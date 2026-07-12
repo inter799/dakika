@@ -1,0 +1,15 @@
+Flask>=2.3.0
+flask-cors>=4.0.0
+python-docx>=0.8.11
+Pillow>=10.0.0
+openai>=1.0.0
+# 可选：Google Gemini
+google-generativeai>=0.8.0
+# 可选：Anthropic Claude
+anthropic>=0.40.0
+# 可选：OCR 图片文字识别（需额外安装 tesseract）
+pytesseract>=0.3.10
+# 网络搜题功能
+duckduckgo-search>=7.0.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0

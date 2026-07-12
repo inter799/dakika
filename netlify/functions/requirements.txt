@@ -1,0 +1,15 @@
+# Netlify Functions 依赖（精简版 — 50MB限制）
+# 核心依赖（必须）
+Flask>=2.3.0
+flask-cors>=4.0.0
+python-docx>=0.8.11
+openai>=1.0.0
+requests>=2.28.0
+beautifulsoup4>=4.12.0
+duckduckgo-search>=8.0.0
+
+# 注意：以下大体积包已设为可选，app.py 会用 try/except 导入
+# Pillow（~40MB）— 图片处理，缺少时图片上传降级
+# pytesseract（~30MB）— OCR，缺少时图片文字识别不可用
+# anthropic（~3MB）— Claude API，缺少时无法使用Claude
+# google-generativeai（~5MB）— Gemini API，缺少时无法使用Gemini

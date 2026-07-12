@@ -1,0 +1,27 @@
+# Netlify 部署配置
+[build]
+  command = "echo 'Build complete'"
+  publish = "."
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "none"
+  included_files = [
+    "app.py",
+    "templates/**",
+    "requirements.txt",
+    "runtime.txt",
+    "netlify/functions/requirements.txt"
+  ]
+
+# API 请求转发到 Netlify Function
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+
+# 所有其他请求也转发到 Function（Flask 处理所有路由：页面 + 登录）
+[[redirects]]
+  from = "/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
