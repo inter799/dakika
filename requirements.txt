@@ -6,9 +6,11 @@ flask-cors>=4.0.0
 # Word 文档解析
 python-docx>=0.8.11
 
-# 图片处理 + OCR 文字识别
+# 图片处理
 Pillow>=10.0.0
-pytesseract>=0.3.10
+
+# OCR 文字识别（需系统 tesseract，仅 Windows 本地使用）
+pytesseract>=0.3.10; sys_platform == "win32"
 
 # AI API 调用
 openai>=1.0.0
