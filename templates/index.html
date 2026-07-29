@@ -197,6 +197,23 @@ body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','M
 .search-result-item .result-snippet { font-size:0.76rem; color:var(--text-secondary); }
 .extracted-q-item { padding:10px 12px; border:1px solid var(--border); border-radius:8px; margin-bottom:8px; font-size:0.78rem; display:flex; align-items:flex-start; gap:8px; }
 .extracted-q-item .q-stem-preview { flex:1; }
+
+/* Question Preview Panel */
+.preview-panel { display:none; padding:12px 0; }
+.preview-panel.show { display:block; }
+.preview-summary { display:flex; gap:16px; flex-wrap:wrap; align-items:center; margin-bottom:14px; padding:12px 16px; background:#F8FAFC; border-radius:10px; border:1px solid var(--border); }
+.preview-summary .stat { text-align:center; min-width:64px; }
+.preview-summary .stat-num { font-size:1.4rem; font-weight:800; color:var(--primary); }
+.preview-summary .stat-label { font-size:0.68rem; color:var(--text-secondary); margin-top:2px; }
+.preview-list { max-height:500px; overflow-y:auto; border:1px solid var(--border); border-radius:10px; }
+.preview-item { display:flex; align-items:flex-start; gap:10px; padding:10px 14px; border-bottom:1px solid var(--border); font-size:0.82rem; cursor:default; }
+.preview-item:last-child { border-bottom:none; }
+.preview-item:hover { background:#F8FAFC; }
+.preview-item .p-num { color:var(--text-secondary); font-weight:700; min-width:32px; text-align:right; flex-shrink:0; }
+.preview-item .p-stem { flex:1; line-height:1.5; color:var(--text); }
+.preview-item .p-answer { color:var(--success); font-weight:700; font-size:0.72rem; white-space:nowrap; margin-left:4px; }
+.preview-item .p-guessed { color:var(--warning); font-size:0.65rem; font-style:italic; }
+.preview-actions { display:flex; gap:8px; margin-top:14px; justify-content:center; }
 .extracted-q-item .q-meta { font-size:0.68rem; color:var(--text-secondary); margin-top:4px; }
 .search-status { text-align:center; padding:20px; color:var(--text-secondary); }
 </style>
@@ -249,12 +266,17 @@ body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','M
                     <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
                         <div class="upload-icon">📁</div>
                         <h3>点击上传 或 拖拽文件</h3>
-                        <p>支持 .txt .doc .docx，题目自动识别并入库</p>
+                        <p>支持 .txt .doc .docx .pdf .xlsx .pptx .rtf .md .html .csv .json 及图片，题目自动识别并入库</p>
                         <div class="file-type-tags">
-                            <span class="tag">📝 .txt</span><span class="tag">📋 .docx</span><span class="tag">📋 .doc</span>
+                            <span class="tag">📝 .txt</span>
+                            <span class="tag">📋 .docx</span>
+                            <span class="tag">📋 .doc</span>
+                            <span class="tag">📄 .pdf</span>
+                            <span class="tag">📊 .xlsx</span>
+                            <span class="tag">🖼️ .jpg</span>
                         </div>
                     </div>
-                    <input type="file" id="fileInput" hidden accept=".txt,.doc,.docx" onchange="handleFileSelect(event)">
+                    <input type="file" id="fileInput" hidden accept=".txt,.doc,.docx,.pdf,.xlsx,.xlsm,.pptx,.rtf,.md,.html,.htm,.csv,.json,.xml,.log,.yaml,.yml,.jpg,.jpeg,.png,.bmp,.gif" onchange="handleFileSelect(event)">
                     <div class="file-info" id="fileInfo">
                         <span class="file-icon-check">✅</span>
                         <div class="file-details"><h4 id="fileName">-</h4><span id="fileMeta">-</span></div>
@@ -299,6 +321,16 @@ body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','M
 
                 <!-- Question Navigator -->
                 <div class="qnav" id="qnav"></div>
+
+                <!-- Question Preview Panel (shows all questions at once) -->
+                <div class="preview-panel" id="previewPanel">
+                    <div class="preview-summary" id="previewSummary"></div>
+                    <div class="preview-list" id="previewList"></div>
+                    <div class="preview-actions">
+                        <button class="btn btn-primary" onclick="startExamFromPreview()">🚀 开始答题</button>
+                        <button class="btn btn-outline" onclick="hideQuestionPreview()">返回</button>
+                    </div>
+                </div>
 
                 <!-- Question Card -->
                 <div class="question-main" id="questionMain">
@@ -382,7 +414,8 @@ function handleFileSelect(event) { const f = event.target.files[0]; if(f) upload
 // ==================== UPLOAD ====================
 async function uploadFile(file) {
     const ext = file.name.split('.').pop().toLowerCase();
-    if (!['txt','doc','docx'].includes(ext)) { showToast('不支持.' + ext, 'e'); return; }
+    const allowedExts = ['txt','doc','docx','pdf','xlsx','xlsm','pptx','rtf','md','html','htm','csv','json','xml','log','yaml','yml','jpg','jpeg','png','bmp','gif'];
+    if (!allowedExts.includes(ext)) { showToast('不支持 .' + ext + ' 格式', 'e'); return; }
     if (file.size > 10*1024*1024) { showToast('文件超过10MB', 'e'); return; }
 
     showLoading('上传并解析题目...');
@@ -399,9 +432,9 @@ async function uploadFile(file) {
         sourceFileText = data.full_text || '';  // 记录原文用于网络搜题
 
         if (data.parsed_questions && data.parsed_questions.questions?.length > 0) {
-            startExam(data.parsed_questions.questions);
-            showToast(`识别到 ${data.parsed_questions.count} 道题，已自动存入题库空间`, 's');
-            saveAllToBank(true);  // 静默自动保存
+            await saveQuestionsToBank(data.parsed_questions.questions, true);  // 先自动入库
+            showQuestionPreview(data.parsed_questions.questions, 'document');
+            showToast(`识别到 ${data.parsed_questions.count} 道题，已自动存入题库空间，请预览确认后开始答题`, 's');
         } else if (data.full_text) {
             // No questions detected - try to generate
             showToast('未检测到题目格式，尝试AI生成...', 'i');
@@ -411,15 +444,87 @@ async function uploadFile(file) {
             });
             const gData = await res2.json();
             if (gData.questions?.length > 0) {
-                startExam(gData.questions);
-                showToast(`已生成 ${gData.questions.length} 道题，自动存入题库`, 's');
-                saveAllToBank(true);  // true = 静默模式
+                await saveQuestionsToBank(gData.questions, true);  // 先自动入库
+                showQuestionPreview(gData.questions, 'document');
+                showToast(`已生成 ${gData.questions.length} 道题，已自动存入题库空间，请预览确认后开始答题`, 's');
             } else {
                 showToast('未能从文件中识别或生成题目，请检查文件内容', 'e');
             }
         }
     } catch(e) { showToast('上传失败: '+e.message, 'e'); }
     hideLoading();
+}
+
+// ==================== QUESTION PREVIEW ====================
+let previewQuestions = [];
+let previewMode = 'document';
+let previewSpaceId = '';
+let previewSpaceName = '';
+
+function showQuestionPreview(questions, mode, spaceId, spaceName) {
+    previewQuestions = questions;
+    previewMode = mode || 'document';
+    previewSpaceId = spaceId || '';
+    previewSpaceName = spaceName || '';
+
+    // Count types
+    const typeCount = {};
+    const typeMap = { choice: '单选题', multi: '多选题', tf: '判断题', fill: '填空题', essay: '问答题' };
+    const typeColorMap = { choice: '#1E40AF', multi: '#92400E', tf: '#9D174D', fill: '#065F46', essay: '#6B21A8' };
+    const typeBgMap = { choice: '#DBEAFE', multi: '#FEF3C7', tf: '#FCE7F3', fill: '#D1FAE5', essay: '#EDE9FE' };
+
+    questions.forEach(q => {
+        const t = q.type || 'choice';
+        typeCount[t] = (typeCount[t] || 0) + 1;
+    });
+
+    // Render summary
+    let summaryHtml = '';
+    for (const [t, count] of Object.entries(typeCount)) {
+        const bg = typeBgMap[t] || '#F1F5F9';
+        const color = typeColorMap[t] || '#64748B';
+        summaryHtml += `<div class="stat">
+            <div class="stat-num" style="color:${color}">${count}</div>
+            <div class="stat-label" style="background:${bg};color:${color};padding:1px 6px;border-radius:4px;display:inline-block;margin-top:4px;">${typeMap[t] || t}</div>
+        </div>`;
+    }
+    document.getElementById('previewSummary').innerHTML = summaryHtml;
+
+    // Render question list
+    let listHtml = '';
+    questions.forEach((q, i) => {
+        const typeLabel = typeMap[q.type] || '选择题';
+        const bg = typeBgMap[q.type] || '#F1F5F9';
+        const color = typeColorMap[q.type] || '#64748B';
+        const guessedMark = q.answer_guessed ? '<span class="p-guessed">（答案由系统推测，建议核实）</span>' : '';
+        listHtml += `<div class="preview-item">
+            <span class="p-num">${i + 1}</span>
+            <span class="type-badge" style="background:${bg};color:${color};flex-shrink:0;">${typeLabel}</span>
+            <span class="p-stem">${escHtml(q.stem)}</span>
+            <span class="p-answer">答案: ${escHtml(q.answer || '?')}</span>
+            ${guessedMark}
+        </div>`;
+    });
+    document.getElementById('previewList').innerHTML = listHtml;
+
+    // Show preview, hide quiz
+    document.getElementById('previewPanel').classList.add('show');
+    document.getElementById('questionMain').style.display = 'none';
+    document.getElementById('qnav').style.display = 'none';
+    document.getElementById('endScreen').classList.remove('show');
+}
+
+function hideQuestionPreview() {
+    document.getElementById('previewPanel').classList.remove('show');
+    document.getElementById('questionMain').style.display = '';
+    previewQuestions = [];
+}
+
+function startExamFromPreview() {
+    if (!previewQuestions.length) return;
+    const qs = previewQuestions;
+    hideQuestionPreview();
+    startExam(qs, previewMode, previewSpaceId, previewSpaceName);
 }
 
 // ==================== START EXAM ====================
@@ -962,6 +1067,7 @@ async function startSpaceExam(spaceId, spaceName) {
 }
 
 function returnToDocument() {
+    hideQuestionPreview();  // 隐藏预览面板
     if (examMode !== 'document' && allQuestions.length > 0) {
         // 保存空间考试错题
         saveSpaceWrongs();
@@ -1220,9 +1326,14 @@ async function toggleSpace(spaceId) {
 
 async function saveAllToBank(silent) {
     if (!allQuestions.length) { if (!silent) showToast('暂无题目可保存', 'e'); return; }
+    return await saveQuestionsToBank(allQuestions, silent);
+}
+
+async function saveQuestionsToBank(questions, silent) {
+    if (!questions?.length) { if (!silent) showToast('暂无题目可保存', 'e'); return; }
     if (!sourceFileName) { if (!silent) showToast('未知文档名，无法保存', 'e'); return; }
 
-    const questionData = allQuestions.map(q => ({
+    const questionData = questions.map(q => ({
         stem: q.stem,
         type: q.type || 'choice',
         options: q.options || [],
@@ -1249,8 +1360,9 @@ async function saveAllToBank(silent) {
         } else {
             if (!silent) showToast(data.error || '保存失败', 'e');
         }
+        return data;
     } catch(e) { if (!silent) showToast('保存失败: ' + e.message, 'e'); }
-    if (!silent) hideLoading();
+    finally { if (!silent) hideLoading(); }
 }
 
 async function saveToBank(realIdx) {

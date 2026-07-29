@@ -1,7 +1,10 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Netlify Serverless Function — Flask WSGI 适配器
 将所有 HTTP 请求转发到 Flask 应用处理
+
+支持：登录认证、Supabase 持久化、PDF/Excel/PPT 解析、AI 出题
 """
 
 import sys
@@ -17,7 +20,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-# Netlify 部署时设置环境标记
+# Netlify 部署时设置环境标记（app.py 会根据此标记切换 /tmp/ 路径）
 os.environ['NETLIFY'] = 'true'
 
 from app import app as flask_app
@@ -31,7 +34,6 @@ def handler(event, context):
     # ---- 解析请求 ----
     http_method = (event.get('httpMethod') or 'GET').upper()
     path = event.get('path') or '/'
-    raw_path = event.get('rawPath') or path
 
     # 去掉 Netlify 函数路径前缀
     prefix = '/.netlify/functions/api'
@@ -80,7 +82,7 @@ def handler(event, context):
         'CONTENT_LENGTH': str(len(raw_body)),
     }
 
-    # 转换请求头为 WSGI 格式（包括 Cookie）
+    # 转换请求头为 WSGI 格式（包含 Cookie 用于 session 认证）
     for key, value in headers.items():
         wsgi_key = 'HTTP_' + key.upper().replace('-', '_')
         environ[wsgi_key] = value

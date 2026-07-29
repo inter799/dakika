@@ -3,7 +3,7 @@
 文件上传 → 题目生成器 v2.0
 - 支持多厂商大模型 API（OpenAI / DeepSeek / Qwen / 智谱 / Kimi / 百度 / Claude / Gemini / 自定义）
 - 内置无需 API 的纯本地模式
-- 支持 txt / doc / docx / jpg / png 文件
+- 支持 txt / doc / docx / pdf / rtf / md / html / json / csv / xlsx / pptx / jpg / png / gif 等文件
 - 本地登录认证，每次登录自动清空上一会话数据
 """
 
@@ -33,6 +33,32 @@ try:
     HAS_TESSERACT = True
 except ImportError:
     HAS_TESSERACT = False
+
+# PDF 解析（可选）
+try:
+    import PyPDF2
+    HAS_PYPDF2 = True
+except ImportError:
+    HAS_PYPDF2 = False
+
+try:
+    import pdfplumber
+    HAS_PDFPLUMBER = True
+except ImportError:
+    HAS_PDFPLUMBER = False
+
+# Excel / PPT 解析（可选）
+try:
+    import openpyxl
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
+
+try:
+    from pptx import Presentation
+    HAS_PPTX = True
+except ImportError:
+    HAS_PPTX = False
 
 # OpenAI SDK 用于所有兼容接口
 try:
@@ -75,14 +101,22 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
+# ==================== 平台检测 ====================
+import platform as _platform
+_IS_WINDOWS = _platform.system() == 'Windows'
+_IS_NETLIFY = os.environ.get('NETLIFY', '') == 'true' or 'netlify' in os.environ.get('_', '')
+
 # ==================== 初始化 ====================
 app = Flask(__name__)
 app.secret_key = 'quiz-generator-v2-local-auth-2024'  # 固定密钥，保证 session 持久
 app.config['JSON_AS_ASCII'] = False  # 关键：确保中文JSON输出不被转义为\uXXXX
 CORS(app, supports_credentials=True)
 
-# Netlify 环境下使用 /tmp/ 作为存储路径（唯一可写目录）
-_IS_NETLIFY = os.environ.get('NETLIFY', '') == 'true' or 'netlify' in os.environ.get('_', '')
+# 尝试初始化 Supabase（Netlify 部署用）
+import supabase_client as db
+_USE_SUPABASE = db.is_configured()
+if _USE_SUPABASE:
+    db.initialize()
 
 if _IS_NETLIFY:
     DATA_ROOT = Path('/tmp/data')
@@ -103,7 +137,9 @@ REMEMBER_DAYS = 30
 
 # ==================== 用户持久化存储 ====================
 def _load_users():
-    """从文件加载用户数据"""
+    """从文件加载用户数据（兼容旧文件存储）"""
+    if _USE_SUPABASE:
+        return {}  # Supabase 模式下不需要加载文件
     if USER_FILE.exists():
         try:
             with open(USER_FILE, 'r', encoding='utf-8') as f:
@@ -114,7 +150,9 @@ def _load_users():
 
 
 def _save_users(users):
-    """保存用户数据到文件"""
+    """保存用户数据到文件（兼容旧文件存储）"""
+    if _USE_SUPABASE:
+        return
     with open(USER_FILE, 'w', encoding='utf-8') as f:
         json.dump(users, f, ensure_ascii=False, indent=2)
 
@@ -128,22 +166,28 @@ def _generate_token():
 
 
 # 启动时加载用户，如果为空则创建默认 admin 用户
-_users_db = _load_users()
-if not _users_db:
-    default_user = os.environ.get('QUIZ_USERNAME', 'admin')
-    default_pw = os.environ.get('QUIZ_PASSWORD', 'admin123')
-    _users_db[default_user] = {
-        'password': _hash_pw(default_pw),
-        'display_name': default_user,
-        'created_at': datetime.now().isoformat(),
-        'remember_token': None
-    }
-    _save_users(_users_db)
+if _USE_SUPABASE:
+    # Supabase 模式下已在 db.initialize() 中创建默认用户
+    _users_db = {}
+else:
+    _users_db = _load_users()
+    if not _users_db:
+        default_user = os.environ.get('QUIZ_USERNAME', 'admin')
+        default_pw = os.environ.get('QUIZ_PASSWORD', 'admin123')
+        _users_db[default_user] = {
+            'password': _hash_pw(default_pw),
+            'display_name': default_user,
+            'created_at': datetime.now().isoformat(),
+            'remember_token': None
+        }
+        _save_users(_users_db)
 
 
 # ==================== 用户工具函数 ====================
 def _verify_password(username, password):
     """验证用户名密码"""
+    if _USE_SUPABASE:
+        return db.verify_password(username, password)
     user = _users_db.get(username)
     if not user:
         return False
@@ -151,19 +195,26 @@ def _verify_password(username, password):
 
 
 def _get_user_uploads(username):
-    """获取用户专属 uploads 目录"""
+    """获取用户专属 uploads 目录（本地/临时）"""
     d = DATA_ROOT / username / 'uploads'
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _get_user_bank_file(username):
-    """获取用户专属题库文件路径"""
+    """获取用户专属题库文件路径（仅文件存储模式）"""
     return DATA_ROOT / username / 'question_bank.json'
 
 
 def _clear_user_data(username):
     """清空指定用户的所有数据"""
+    if _USE_SUPABASE:
+        db.clear_all_spaces(username)
+        # 清空临时上传目录
+        uploads_dir = DATA_ROOT / username / 'uploads'
+        if uploads_dir.exists():
+            shutil.rmtree(str(uploads_dir), ignore_errors=True)
+        return
     user_dir = DATA_ROOT / username
     uploads_dir = user_dir / 'uploads'
     bank_file = user_dir / 'question_bank.json'
@@ -183,6 +234,8 @@ def _clear_user_data(username):
 
 def _load_bank_for_user(username):
     """加载指定用户的题库"""
+    if _USE_SUPABASE:
+        return {"spaces": {}, "questions": [], "next_id": 1}  # Supabase 模式不使用 JSON
     bf = _get_user_bank_file(username)
     if bf.exists():
         try:
@@ -212,7 +265,9 @@ def _new_bank():
 
 
 def _save_bank_for_user(username, bank):
-    """保存指定用户的题库"""
+    """保存指定用户的题库（仅文件存储模式）"""
+    if _USE_SUPABASE:
+        return
     bf = _get_user_bank_file(username)
     bf.parent.mkdir(parents=True, exist_ok=True)
     with open(bf, 'w', encoding='utf-8') as f:
@@ -232,16 +287,26 @@ def check_auto_login():
     # 未登录 → 尝试自动登录
     token = request.cookies.get(REMEMBER_COOKIE_NAME)
     if token:
-        global _users_db
-        _users_db = _load_users()
-        for uname, udata in _users_db.items():
-            if udata.get('remember_token') and udata.get('remember_token') == token:
+        if _USE_SUPABASE:
+            udata = db.find_by_remember_token(token)
+            if udata:
                 session['logged_in'] = True
-                session['username'] = uname
-                session['display_name'] = udata.get('display_name', uname)
-                g.user_uploads = _get_user_uploads(uname)
-                g.user_bank_file = _get_user_bank_file(uname)
+                session['username'] = udata['username']
+                session['display_name'] = udata.get('display_name', udata['username'])
+                g.user_uploads = _get_user_uploads(udata['username'])
+                g.user_bank_file = _get_user_bank_file(udata['username'])
                 return
+        else:
+            global _users_db
+            _users_db = _load_users()
+            for uname, udata in _users_db.items():
+                if udata.get('remember_token') and udata.get('remember_token') == token:
+                    session['logged_in'] = True
+                    session['username'] = uname
+                    session['display_name'] = udata.get('display_name', uname)
+                    g.user_uploads = _get_user_uploads(uname)
+                    g.user_bank_file = _get_user_bank_file(uname)
+                    return
 
     # 未登录也未匹配 token → 设置默认路径（防止 500）
     g.user_uploads = None
@@ -277,7 +342,22 @@ def _generate_space_id(name):
     ts = datetime.now().strftime('%Y%m%d%H%M%S')
     return f"{base}_{ts}"
 
-ALLOWED_EXTENSIONS = {'txt', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'bmp', 'gif'}
+ALLOWED_EXTENSIONS = {
+    # 文本文档
+    'txt', 'md', 'json', 'csv', 'xml', 'log', 'yaml', 'yml',
+    # 富文本文档
+    'rtf', 'html', 'htm',
+    # Word
+    'doc', 'docx',
+    # PDF
+    'pdf',
+    # Excel
+    'xlsx', 'xlsm',
+    # PowerPoint
+    'pptx',
+    # 图片
+    'jpg', 'jpeg', 'png', 'bmp', 'gif'
+}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 
@@ -432,34 +512,85 @@ def extract_text_from_docx(filepath):
 
 def extract_text_from_doc(filepath):
     """.doc 旧版二进制格式：尝试提取可读文本"""
+    com_errors = []
     try:
         # 方法1: 尝试作为 zip 读取（有些 .doc 实际是 .docx）
         if _is_zip_docx(filepath):
             return extract_text_from_docx(filepath)
 
         # 方法2: 读取原始字节，提取可读文本段落
-        with open(filepath, 'rb') as f:
-            raw = f.read()
+        try:
+            with open(filepath, 'rb') as f:
+                raw = f.read()
 
-        # 尝试不同编码提取可读文本
-        text_parts = []
-        for enc in ['utf-8', 'gbk', 'gb2312', 'utf-16-le', 'latin-1']:
+            text_parts = []
+            for enc in ['utf-8', 'gbk', 'gb2312', 'utf-16-le', 'latin-1']:
+                try:
+                    decoded = raw.decode(enc, errors='ignore')
+                    # 提取连续的可读中英文段落（至少20个字符）
+                    paragraphs = re.findall('[\\u4e00-\\u9fa5a-zA-Z0-9\\s，。！？；：、""''《》（）…—.,!?;:()\\[\\]【】]{20,}', decoded)
+                    if paragraphs:
+                        text_parts.extend(paragraphs)
+                        break  # 找到合适编码就停止
+                except Exception:
+                    continue
+
+            if text_parts:
+                result = '\n\n'.join(text_parts)
+                if len(result) >= 100:
+                    return result
+        except Exception:
+            pass
+
+        # 方法3: Windows 上调用 Word / WPS COM 接口提取文本
+        # Flask 是多线程环境，必须在每个线程中初始化 COM
+        word = None
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+        except Exception as e:
+            com_errors.append(f"COM初始化失败: {e}")
+
+        try:
+            import win32com.client as win32
+            for progid in ["Word.Application", "KWPS.Application", "WPS.Application", "Kwps.Application", "Et.Application"]:
+                try:
+                    word = win32.Dispatch(progid)
+                    break
+                except Exception as e:
+                    com_errors.append(f"{progid}: {e}")
+                    word = None
+
+            if word:
+                word.Visible = False
+                word.DisplayAlerts = 0
+                abs_path = os.path.abspath(filepath)
+                doc = word.Documents.Open(abs_path, ReadOnly=True)
+                text = doc.Content.Text
+                doc.Close(SaveChanges=False)
+                extracted = text.strip() if text else ''
+                # 即使 Word 退出报错，也不应影响已提取的文本
+                try:
+                    word.Quit()
+                except Exception as e:
+                    com_errors.append(f"Word.Application.Quit: {e}")
+                if extracted:
+                    return extracted
+        except Exception as e:
+            com_errors.append(f"COM提取失败: {e}")
+        finally:
             try:
-                decoded = raw.decode(enc, errors='ignore')
-                # 提取连续的可读中英文段落（至少20个字符）
-                paragraphs = re.findall(r'[]一-龥a-zA-Z0-9\s，。！？；：、""''《》（）…—.,!?;:()[-]{20,}', decoded)
-                if paragraphs:
-                    text_parts.extend(paragraphs)
-                    break  # 找到合适编码就停止
+                if word:
+                    word.Quit()
             except Exception:
-                continue
+                pass
+            try:
+                import pythoncom
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
 
-        if text_parts:
-            result = '\n\n'.join(text_parts)
-            if len(result) >= 100:
-                return result
-
-        # 方法3: 尝试用 antiword 命令行工具
+        # 方法4: 尝试用 antiword 命令行工具（Linux/macOS）
         import subprocess
         try:
             proc = subprocess.run(['antiword', str(filepath)], capture_output=True, text=True, timeout=10)
@@ -468,9 +599,12 @@ def extract_text_from_doc(filepath):
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
-        return "[错误] 无法解析旧版 .doc 文件。请用 Word 打开该文件，另存为 .docx 或 .txt 后重新上传。"
+        err_detail = '; '.join(com_errors) if com_errors else '未知原因'
+        return (f"[错误] 无法解析旧版 .doc 文件。\n"
+                f"[建议] 请用 Word/WPS 打开后另存为 .docx 或 .txt 再上传。\n"
+                f"[详情] {err_detail}")
     except Exception as e:
-        return f"[错误] 无法解析旧版 .doc 文件: {e}。请另存为 .docx 或 .txt 后重新上传。"
+        return f"[错误] 无法解析旧版 .doc 文件: {e}。请确保电脑已安装 Word 或 WPS，或者手动另存为 .docx / .txt 后重新上传。"
 
 
 def extract_text_from_image(filepath):
@@ -491,21 +625,187 @@ def extract_text_from_image(filepath):
         return f"[错误] 解析图片失败: {e}"
 
 
+def extract_text_from_pdf(filepath):
+    """解析 PDF 文件，优先使用 pdfplumber，回退到 PyPDF2"""
+    if HAS_PDFPLUMBER:
+        try:
+            pages_text = []
+            with pdfplumber.open(filepath) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        pages_text.append(page_text)
+            text = '\n\n'.join(pages_text)
+            if text.strip():
+                return text
+        except Exception as e:
+            pass  # 回退到 PyPDF2
+
+    if HAS_PYPDF2:
+        try:
+            pages_text = []
+            with open(filepath, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                for page in reader.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        pages_text.append(page_text)
+            text = '\n\n'.join(pages_text)
+            if text.strip():
+                return text
+            return "[提示] PDF 中未检测到可提取文字（可能是扫描版图片PDF，需要 OCR）"
+        except Exception as e:
+            return f"[错误] 解析 PDF 失败: {e}。请安装依赖: py -m pip install pdfplumber PyPDF2"
+
+    return "[错误] 请安装 PDF 解析依赖: py -m pip install pdfplumber PyPDF2"
 
 
+def extract_text_from_rtf(filepath):
+    """解析 RTF 富文本格式：剥离控制符，保留可见文本"""
+    try:
+        with open(filepath, 'rb') as f:
+            raw = f.read()
+        # 尝试不同编码
+        for enc in ['utf-8', 'gbk', 'gb2312', 'latin-1']:
+            try:
+                text = raw.decode(enc, errors='ignore')
+                break
+            except Exception:
+                text = ''
+        if not text:
+            return "[错误] 无法读取 RTF 文件"
+        # 简单剥离 RTF 控制符
+        text = re.sub(r'\\[a-z]+\d*\s?', '', text)
+        text = re.sub(r'\\[*\{\}\~\-]', '', text)
+        text = re.sub(r'\{\\[^}]+\}', '', text)
+        text = re.sub(r'[\{\}]', '', text)
+        text = re.sub(r'\\par\b', '\n', text, flags=re.IGNORECASE)
+        text = re.sub(r'\\tab\b', '\t', text, flags=re.IGNORECASE)
+        text = re.sub(r'\\line\b', '\n', text, flags=re.IGNORECASE)
+        text = re.sub(r'\\[0-9a-fA-F]{2}', '', text)
+        text = re.sub(r'\\$', '', text)
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
+        text = '\n'.join(line.strip() for line in text.splitlines() if line.strip())
+        return text if text.strip() else "[提示] RTF 文件中未检测到文字"
+    except Exception as e:
+        return f"[错误] 解析 RTF 失败: {e}"
+
+
+def extract_text_from_plain(filepath):
+    """读取普通文本类文件：md / html / htm / json / csv / xml / log / yaml / yml"""
+    try:
+        with open(filepath, 'rb') as f:
+            raw = f.read()
+        for enc in ['utf-8', 'gbk', 'gb2312', 'latin-1']:
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                text = raw.decode('utf-8', errors='replace')
+        return text
+    except Exception as e:
+        return f"[错误] 读取文本文件失败: {e}"
+
+
+def extract_text_from_xlsx(filepath):
+    """解析 Excel 表格文件，读取每个单元格的文本"""
+    if not HAS_OPENPYXL:
+        return "[错误] 请安装 openpyxl: py -m pip install openpyxl"
+    try:
+        wb = openpyxl.load_workbook(filepath, data_only=True)
+        lines = []
+        for sheet in wb.worksheets:
+            for row in sheet.iter_rows(values_only=True):
+                row_text = ' '.join(str(cell) for cell in row if cell is not None)
+                if row_text.strip():
+                    lines.append(row_text)
+        text = '\n'.join(lines)
+        return text if text.strip() else "[提示] Excel 文件中未检测到文字"
+    except Exception as e:
+        return f"[错误] 解析 Excel 失败: {e}"
+
+
+def extract_text_from_pptx(filepath):
+    """解析 PowerPoint 演示文稿"""
+    if not HAS_PPTX:
+        return "[错误] 请安装 python-pptx: py -m pip install python-pptx"
+    try:
+        prs = Presentation(filepath)
+        texts = []
+        for slide_idx, slide in enumerate(prs.slides, 1):
+            for shape in slide.shapes:
+                if hasattr(shape, 'text') and shape.text.strip():
+                    texts.append(shape.text.strip())
+        text = '\n\n'.join(texts)
+        return text if text.strip() else "[提示] PPT 中未检测到文字"
+    except Exception as e:
+        return f"[错误] 解析 PPT 失败: {e}"
 
 
 def extract_text(filepath, original_filename):
     ext = original_filename.rsplit('.', 1)[1].lower() if '.' in original_filename else ''
     handlers = {
-        'txt': extract_text_from_txt,
+        # Word
         'docx': extract_text_from_docx,
         'doc': extract_text_from_doc,
+        # PDF
+        'pdf': extract_text_from_pdf,
+        # RTF
+        'rtf': extract_text_from_rtf,
+        # Excel
+        'xlsx': extract_text_from_xlsx,
+        'xlsm': extract_text_from_xlsx,
+        # PowerPoint
+        'pptx': extract_text_from_pptx,
+        # 图片
         'jpg': extract_text_from_image, 'jpeg': extract_text_from_image,
         'png': extract_text_from_image, 'bmp': extract_text_from_image,
         'gif': extract_text_from_image,
+        # 纯文本类
+        'txt': extract_text_from_plain,
+        'md': extract_text_from_plain,
+        'json': extract_text_from_plain,
+        'csv': extract_text_from_plain,
+        'xml': extract_text_from_plain,
+        'log': extract_text_from_plain,
+        'yaml': extract_text_from_plain,
+        'yml': extract_text_from_plain,
+        'html': extract_text_from_plain,
+        'htm': extract_text_from_plain,
     }
     return handlers.get(ext, lambda _: f"[错误] 不支持 .{ext} 格式")(filepath)
+
+
+# ==================== 文本规范化 ====================
+
+def normalize_text(text):
+    """规范化从各种来源提取的文本，统一字符格式，提高题目识别率"""
+    if not text:
+        return text
+    # 全角字母 → 半角
+    text = text.translate(str.maketrans(
+        'ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ'
+        'ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ'
+        '０１２３４５６７８９',
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        'abcdefghijklmnopqrstuvwxyz'
+        '0123456789'
+    ))
+    # 全角标点 → 半角
+    text = text.replace('．', '.').replace('：', ':').replace('，', ',')
+    text = text.replace('（', '(').replace('）', ')').replace('【', '[').replace('】', ']')
+    text = text.replace('《', '<').replace('》', '>').replace('；', ';')
+    text = text.replace('？', '?').replace('！', '!').replace('～', '~')
+    # 全角空格 → 半角空格
+    text = text.replace('\u3000', ' ')
+    # 统一换行符
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    # 合并多余空行（最多保留一个空行）
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # 清理每行首尾空白
+    lines = [line.strip() for line in text.split('\n')]
+    text = '\n'.join(lines)
+    return text
 
 
 # ==================== 题目识别与解析 ====================
@@ -686,7 +986,9 @@ def _parse_one_block(block, q_id):
     elif not opt_list and qtype in ('choice', 'multi'):
         opt_list = ['A. 选项A', 'B. 选项B', 'C. 选项C', 'D. 选项D']
 
+    answer_guessed = False
     if not answer:
+        answer_guessed = True
         if qtype == 'tf':
             answer = '正确' if q_id % 2 == 0 else '错误'
         else:
@@ -694,7 +996,7 @@ def _parse_one_block(block, q_id):
 
     analysis = _gen_analysis(qtype, stem, answer, opt_list)
 
-    return {
+    result = {
         'id': q_id,
         'type': qtype,
         'stem': stem.strip(),
@@ -702,6 +1004,9 @@ def _parse_one_block(block, q_id):
         'answer': answer,
         'analysis': analysis,
     }
+    if answer_guessed:
+        result['answer_guessed'] = True
+    return result
 
 
 def _clean_stem(stem):
@@ -721,22 +1026,23 @@ def _clean_stem(stem):
 
 
 def _detect_type(block, answer, options):
+    # 判断题：2个选项 + 选项包含"正确/错误/对/错" + 答案也是正确/错误
     if len(options) == 2:
         texts = ' '.join(o[1] for o in options if isinstance(o, tuple) and len(o) > 1)
         if re.search(r'正确|错误|对|错', texts):
-            return 'tf'
+            if answer in ('正确', '错误', '对', '错'):
+                return 'tf'
 
-    if answer in ('正确', '错误', '对', '错'):
-        if len(options) <= 2:
-            return 'tf'
-
+    # 答案长度为 >=2 且全是字母 → 多选题
     if len(answer) >= 2 and re.match(r'^[A-E]+$', answer):
         return 'multi'
 
-    if re.search(r'多选|不定项|多项|至少', block):
+    # 题干明确标注多选/不定项/多项
+    if re.search(r'多选|不定项|多项|至少.*选|选出.?包括', block):
         return 'multi'
 
-    if len(options) >= 5:
+    # 选项数量 >= 5 时，如果是多选题答案字母数 >=2 才判多选
+    if len(options) >= 5 and len(answer) >= 2 and re.match(r'^[A-E]+$', answer):
         return 'multi'
 
     return 'choice'
@@ -1348,21 +1654,27 @@ def api_register():
     if len(password) < 4:
         return jsonify({"error": "密码至少需要4位"}), 400
 
-    global _users_db
-    _users_db = _load_users()
+    if _USE_SUPABASE:
+        if db.user_exists(username):
+            return jsonify({"error": "该用户名已被注册"}), 409
+        user_data = db.create_user(username, password, display_name)
+        token = user_data['remember_token']
+    else:
+        global _users_db
+        _users_db = _load_users()
 
-    if username.lower() in {k.lower() for k in _users_db}:
-        return jsonify({"error": "该用户名已被注册"}), 409
+        if username.lower() in {k.lower() for k in _users_db}:
+            return jsonify({"error": "该用户名已被注册"}), 409
 
-    # 创建用户
-    token = _generate_token()
-    _users_db[username] = {
-        'password': _hash_pw(password),
-        'display_name': display_name,
-        'created_at': datetime.now().isoformat(),
-        'remember_token': token
-    }
-    _save_users(_users_db)
+        # 创建用户
+        token = _generate_token()
+        _users_db[username] = {
+            'password': _hash_pw(password),
+            'display_name': display_name,
+            'created_at': datetime.now().isoformat(),
+            'remember_token': token
+        }
+        _save_users(_users_db)
 
     # 自动登录
     session.clear()
@@ -1400,27 +1712,35 @@ def api_login():
     if not username or not password:
         return jsonify({"error": "用户名和密码不能为空"}), 400
 
-    global _users_db
-    _users_db = _load_users()
-
     if _verify_password(username, password):
         session.clear()
         session['logged_in'] = True
         session['username'] = username
-        session['display_name'] = _users_db.get(username, {}).get('display_name', username)
+
+        if _USE_SUPABASE:
+            user_data = db.get_user(username)
+            display_name = user_data.get('display_name', username) if user_data else username
+        else:
+            global _users_db
+            _users_db = _load_users()
+            display_name = _users_db.get(username, {}).get('display_name', username)
+
+        session['display_name'] = display_name
 
         resp = make_response(jsonify({
             "success": True,
             "message": f"登录成功，欢迎回来！",
             "username": username,
-            "display_name": _users_db.get(username, {}).get('display_name', username)
+            "display_name": display_name
         }))
 
         if remember:
-            # 生成/更新 remember token
             token = _generate_token()
-            _users_db[username]['remember_token'] = token
-            _save_users(_users_db)
+            if _USE_SUPABASE:
+                db.update_remember_token(username, token)
+            else:
+                _users_db[username]['remember_token'] = token
+                _save_users(_users_db)
             resp.set_cookie(
                 REMEMBER_COOKIE_NAME, token,
                 max_age=REMEMBER_DAYS * 86400,
@@ -1428,9 +1748,11 @@ def api_login():
                 samesite='Lax'
             )
         else:
-            # 清除旧 token
-            _users_db[username]['remember_token'] = None
-            _save_users(_users_db)
+            if _USE_SUPABASE:
+                db.update_remember_token(username, None)
+            else:
+                _users_db[username]['remember_token'] = None
+                _save_users(_users_db)
             resp.set_cookie(REMEMBER_COOKIE_NAME, '', max_age=0)
 
         return resp
@@ -1443,11 +1765,14 @@ def api_logout():
     """登出 — 清除 cookie 和 token"""
     username = session.get('username')
     if username:
-        global _users_db
-        _users_db = _load_users()
-        if username in _users_db:
-            _users_db[username]['remember_token'] = None
-            _save_users(_users_db)
+        if _USE_SUPABASE:
+            db.update_remember_token(username, None)
+        else:
+            global _users_db
+            _users_db = _load_users()
+            if username in _users_db:
+                _users_db[username]['remember_token'] = None
+                _save_users(_users_db)
     session.clear()
     resp = make_response(jsonify({"success": True}))
     resp.set_cookie(REMEMBER_COOKIE_NAME, '', max_age=0)
@@ -1550,6 +1875,8 @@ def upload_file():
             return jsonify({"error": full_text.strip("[]错误 ").strip()}), 400
         if full_text.startswith("[提示]"):
             return jsonify({"error": full_text.strip("[]提示 ").strip()}), 400
+        # 规范化文本，统一全角/半角字符
+        full_text = normalize_text(full_text)
         truncated = len(full_text) > 6000
         display_text = full_text[:6000] + ("\n\n...[文本过长已截断]..." if truncated else "")
 
@@ -1600,6 +1927,9 @@ def generate_questions():
 
         if not text.strip():
             return jsonify({"error": "文本内容为空"}), 400
+
+        # 规范化文本
+        text = normalize_text(text)
 
         # 优先识别文档中已有的题目，避免重新生成导致答案不一致
         has_existing, _, detected_type = detect_existing_questions(text)
@@ -1660,6 +1990,15 @@ def generate_questions():
 @login_required
 def get_bank():
     """获取题库摘要（所有空间概览）"""
+    if _USE_SUPABASE:
+        username = session.get('username', '')
+        spaces_summary = db.get_spaces_summary(username)
+        return jsonify({
+            "spaces": spaces_summary,
+            "total_spaces": len(spaces_summary),
+            "total_questions": sum(s.get("question_count", 0) for s in spaces_summary),
+            "questions": [],
+        })
     bank = _load_bank()
     spaces_summary = []
     for sid, sdata in bank.get("spaces", {}).items():
@@ -1677,7 +2016,7 @@ def get_bank():
         "spaces": spaces_summary,
         "total_spaces": len(spaces_summary),
         "total_questions": sum(s.get("question_count", 0) for s in spaces_summary),
-        "questions": bank.get("questions", []),  # 兼容旧接口
+        "questions": bank.get("questions", []),
     })
 
 
@@ -1685,6 +2024,19 @@ def get_bank():
 @login_required
 def list_spaces():
     """列出所有文档空间"""
+    if _USE_SUPABASE:
+        username = session.get('username', '')
+        spaces = db.list_spaces(username)
+        result = []
+        for s in spaces:
+            questions = db.get_space_questions(s['id'])
+            result.append({
+                "space_id": s['id'],
+                "name": s.get('name', s['id']),
+                "created_at": s.get('created_at', ''),
+                "question_count": len(questions),
+            })
+        return jsonify(result)
     bank = _load_bank()
     result = []
     for sid, sdata in bank.get("spaces", {}).items():
@@ -1702,6 +2054,25 @@ def list_spaces():
 @login_required
 def get_space(space_id):
     """获取指定空间的题目"""
+    if _USE_SUPABASE:
+        space = db.get_space(space_id)
+        if not space:
+            return jsonify({"error": "空间未找到"}), 404
+        questions = db.get_space_questions(space_id)
+        # 将 JSON 字符串转回 Python 对象
+        for q in questions:
+            if isinstance(q.get('options'), str):
+                try:
+                    q['options'] = json.loads(q['options'])
+                except Exception:
+                    q['options'] = []
+        return jsonify({
+            "space_id": space_id,
+            "name": space.get("name", space_id),
+            "created_at": space.get("created_at", ""),
+            "questions": questions,
+            "total": len(questions)
+        })
     bank = _load_bank()
     space = bank.get("spaces", {}).get(space_id)
     if not space:
@@ -1727,9 +2098,32 @@ def save_batch_to_bank():
     space_name = data.get('space_name', '未命名文档')
     space_id = data.get('space_id', None)
     source_text = data.get('source_text', '')
+    username = session.get('username', '')
 
     if not questions or not isinstance(questions, list):
         return jsonify({"error": "没有题目数据"}), 400
+
+    if _USE_SUPABASE:
+        if not space_id:
+            # 检查同名空间是否存在
+            spaces = db.list_spaces(username)
+            for s in spaces:
+                if s.get('name') == space_name:
+                    space_id = s['id']
+                    break
+            if not space_id:
+                space_data = db.create_space(username, space_name, source_text)
+                space_id = space_data['id']
+
+        saved_count = db.save_questions_to_space(space_id, questions)
+        total = len(db.get_space_questions(space_id))
+        return jsonify({
+            "success": True,
+            "space_id": space_id,
+            "space_name": space_name,
+            "added": saved_count,
+            "total_in_space": total
+        })
 
     bank = _load_bank()
 
@@ -1738,7 +2132,6 @@ def save_batch_to_bank():
 
     existing = bank.get("spaces", {}).get(space_id, None)
     if existing:
-        # 追加到已有空间
         start_id = existing.get("next_id", len(existing.get("questions", [])) + 1)
         for q in questions:
             q["bank_id"] = start_id
@@ -1748,7 +2141,6 @@ def save_batch_to_bank():
         if source_text:
             existing["source_text"] = source_text
     else:
-        # 创建新空间
         start_id = 1
         for q in questions:
             q["bank_id"] = start_id
@@ -1788,6 +2180,36 @@ def add_to_bank():
     space_id = data.get('space_id') or data.get('space_name', '未命名文档')
     space_name = data.get('space_name', '未命名文档')
     source_text = data.get('source_text', '')
+    username = session.get('username', '')
+
+    if _USE_SUPABASE:
+        # 如果 space_id 不像 ID，按名称查找
+        if not re.search(r'\d{14}$', space_id or ''):
+            spaces = db.list_spaces(username)
+            for s in spaces:
+                if s.get('name') == space_name:
+                    space_id = s['id']
+                    break
+            else:
+                space_id = None
+
+        if not space_id:
+            space_data = db.create_space(username, space_name, source_text)
+            space_id = space_data['id']
+        elif not db.space_exists(space_id):
+            space_data = db.create_space(username, space_name, source_text)
+            space_id = space_data['id']
+
+        saved_count = db.save_questions_to_space(space_id, questions)
+        total = len(db.get_space_questions(space_id))
+        return jsonify({
+            "success": True,
+            "space_id": space_id,
+            "space_name": space_name,
+            "added": saved_count,
+            "total": total,
+            "total_in_space": total
+        })
 
     # 如果 space_id 看起来不像 ID，则用文档名生成
     if not re.search(r'\d{14}$', space_id or ''):
@@ -1837,11 +2259,6 @@ def add_to_bank():
 @login_required
 def rename_space(space_id):
     """重命名文档空间"""
-    bank = _load_bank()
-    space = bank.get("spaces", {}).get(space_id)
-    if not space:
-        return jsonify({"error": "空间未找到"}), 404
-
     data = request.get_json()
     if not data:
         return jsonify({"error": "请求数据为空"}), 400
@@ -1850,19 +2267,31 @@ def rename_space(space_id):
     if not new_name:
         return jsonify({"error": "空间名称不能为空"}), 400
 
+    if _USE_SUPABASE:
+        if not db.space_exists(space_id):
+            return jsonify({"error": "空间未找到"}), 404
+        db.update_space_name(space_id, new_name)
+        return jsonify({"success": True, "space_id": space_id, "name": new_name})
+
+    bank = _load_bank()
+    space = bank.get("spaces", {}).get(space_id)
+    if not space:
+        return jsonify({"error": "空间未找到"}), 404
     space["name"] = new_name
     _save_bank(bank)
-    return jsonify({
-        "success": True,
-        "space_id": space_id,
-        "name": new_name
-    })
+    return jsonify({"success": True, "space_id": space_id, "name": new_name})
 
 
 @app.route('/api/bank/space/<space_id>', methods=['DELETE'])
 @login_required
 def delete_space(space_id):
     """删除整个文档空间"""
+    if _USE_SUPABASE:
+        if not db.space_exists(space_id):
+            return jsonify({"error": "空间未找到"}), 404
+        db.delete_space(space_id)
+        return jsonify({"success": True})
+
     bank = _load_bank()
     if space_id not in bank.get("spaces", {}):
         return jsonify({"error": "空间未找到"}), 404
@@ -1876,6 +2305,20 @@ def delete_space(space_id):
 @login_required
 def record_wrong_answers(space_id):
     """记录某个空间内答错的题目"""
+    if _USE_SUPABASE:
+        if not db.space_exists(space_id):
+            return jsonify({"error": "空间未找到"}), 404
+        data = request.get_json()
+        wrong_list = data.get('wrong_questions', [])
+        if not wrong_list:
+            return jsonify({"error": "没有错题数据"}), 400
+        db.record_wrong_answers(space_id, wrong_list)
+        return jsonify({
+            "success": True,
+            "wrong_count": len(db.get_wrong_questions(space_id)),
+            "space_id": space_id
+        })
+
     bank = _load_bank()
     space = bank.get("spaces", {}).get(space_id)
     if not space:
@@ -1886,7 +2329,6 @@ def record_wrong_answers(space_id):
     if not wrong_list:
         return jsonify({"error": "没有错题数据"}), 400
 
-    # 初始化错题本
     if "wrong_book" not in space:
         space["wrong_book"] = {}
 
@@ -1916,6 +2358,24 @@ def record_wrong_answers(space_id):
 @login_required
 def get_wrong_questions(space_id):
     """获取某空间的错题本"""
+    if _USE_SUPABASE:
+        space = db.get_space(space_id)
+        if not space:
+            return jsonify({"error": "空间未找到"}), 404
+        wrong_list = db.get_wrong_questions(space_id)
+        for q in wrong_list:
+            if isinstance(q.get('options'), str):
+                try:
+                    q['options'] = json.loads(q['options'])
+                except Exception:
+                    q['options'] = []
+        return jsonify({
+            "space_id": space_id,
+            "space_name": space.get("name", space_id),
+            "wrong_questions": wrong_list,
+            "wrong_count": len(wrong_list)
+        })
+
     bank = _load_bank()
     space = bank.get("spaces", {}).get(space_id)
     if not space:
@@ -1937,6 +2397,12 @@ def get_wrong_questions(space_id):
 @login_required
 def clear_wrong_questions(space_id):
     """清空某空间的错题本"""
+    if _USE_SUPABASE:
+        if not db.space_exists(space_id):
+            return jsonify({"error": "空间未找到"}), 404
+        db.clear_wrong_questions(space_id)
+        return jsonify({"success": True, "space_id": space_id})
+
     bank = _load_bank()
     space = bank.get("spaces", {}).get(space_id)
     if not space:
@@ -1950,7 +2416,13 @@ def clear_wrong_questions(space_id):
 @app.route('/api/bank/<int:bank_id>', methods=['DELETE'])
 @login_required
 def delete_from_bank(bank_id):
-    """从题库中删除指定题目（遍历所有空间）"""
+    """从题库中删除指定题目"""
+    if _USE_SUPABASE:
+        space_id = db.delete_question_by_bank_id(bank_id)
+        if not space_id:
+            return jsonify({"error": "题目未找到"}), 404
+        return jsonify({"success": True, "deleted_from": space_id})
+
     bank = _load_bank()
     for sid, sdata in bank.get("spaces", {}).items():
         before = len(sdata["questions"])
@@ -1967,6 +2439,10 @@ def delete_from_bank(bank_id):
 @login_required
 def clear_bank():
     """清空所有题库空间"""
+    if _USE_SUPABASE:
+        username = session.get('username', '')
+        db.clear_all_spaces(username)
+        return jsonify({"success": True, "total": 0})
     _save_bank(_new_bank())
     return jsonify({"success": True, "total": 0})
 
@@ -1978,6 +2454,10 @@ def get_config():
         "has_docx": HAS_DOCX,
         "has_pil": HAS_PIL,
         "has_tesseract": HAS_TESSERACT,
+        "has_pdfplumber": HAS_PDFPLUMBER,
+        "has_pypdf2": HAS_PYPDF2,
+        "has_openpyxl": HAS_OPENPYXL,
+        "has_pptx": HAS_PPTX,
         "has_openai_sdk": HAS_OPENAI_SDK,
         "has_gemini": HAS_GEMINI,
         "has_anthropic": HAS_ANTHROPIC,
@@ -2297,11 +2777,34 @@ def search_questions():
 
 
 if __name__ == '__main__':
-    print("=" * 55)
+    _OS_INFO = f"Windows {_platform.release()}" if _IS_WINDOWS else _platform.platform()
+    print("=" * 60)
     print("  文件上传 → 题目生成器 v2.0")
+    print(f"  运行平台: {_OS_INFO}")
     print("  访问: http://127.0.0.1:5000")
+    print("  默认账号: admin / admin123")
     print("  支持: OpenAI | DeepSeek | Qwen | 智谱 | Kimi")
     print("        百度文心 | Claude | Gemini | 自定义接口")
     print("  内置: 纯本地模式（无需任何API）")
-    print("=" * 55)
+    print("-" * 60)
+    if _IS_WINDOWS:
+        # Windows 特有功能状态
+        _has_pywin32 = False
+        try:
+            import win32com.client
+            _has_pywin32 = True
+        except ImportError:
+            pass
+        _has_tesseract_exe = False
+        try:
+            import subprocess as _sp
+            _r = _sp.run(['where', 'tesseract'], capture_output=True, text=True, timeout=5)
+            _has_tesseract_exe = _r.returncode == 0
+        except Exception:
+            pass
+
+        print(f"  .doc 旧版文件解析: {'可用' if _has_pywin32 else '不可用（需 pywin32 + Word/WPS）'}")
+        print(f"  OCR 图片文字识别: {'可用' if HAS_TESSERACT and _has_tesseract_exe else '不可用（需 Tesseract OCR）'}")
+        print(f"  图片上传处理:       {'可用' if HAS_PIL else '不可用（需 Pillow）'}")
+    print("=" * 60)
     app.run(debug=True, host='0.0.0.0', port=5000)

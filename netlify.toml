@@ -1,4 +1,9 @@
 # Netlify 部署配置
+# ⚠️ 部署前请在 Netlify Dashboard → Site Settings → Environment Variables 添加：
+#   SUPABASE_URL        = https://xxxxx.supabase.co
+#   SUPABASE_ANON_KEY   = eyJh...（公开 anon key）
+#   SUPABASE_SERVICE_KEY = eyJh...（service_role key，可选）
+
 [build]
   command = "echo 'Build complete'"
   publish = "."
@@ -8,19 +13,14 @@
   node_bundler = "none"
   included_files = [
     "app.py",
+    "supabase_client.py",
     "templates/**",
     "requirements.txt",
     "runtime.txt",
     "netlify/functions/requirements.txt"
   ]
 
-# API 请求转发到 Netlify Function
-[[redirects]]
-  from = "/api/*"
-  to = "/.netlify/functions/api/:splat"
-  status = 200
-
-# 所有其他请求也转发到 Function（Flask 处理所有路由：页面 + 登录）
+# 所有请求转发到 Netlify Function（Flask 处理全部路由）
 [[redirects]]
   from = "/*"
   to = "/.netlify/functions/api/:splat"

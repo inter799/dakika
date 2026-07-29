@@ -5,8 +5,14 @@ __pycache__/
 .venv/
 venv/
 
-# Uploads
+# Uploads & Runtime data
 uploads/
+data/
+users.json
+question_bank.json
+
+# Logs
+*.log
 
 # IDE
 .vscode/
@@ -16,10 +22,26 @@ uploads/
 .DS_Store
 Thumbs.db
 
-# User data (created at runtime)
-users.json
-question_bank.json
-data/
-
 # Environment
 .env
+
+# Node
+node_modules/
+package-lock.json
+
+# Netlify local state
+.netlify/
+
+# Unrelated projects
+.rivet/
+.rivet-config.json
+.rivet.md
+capacitor-app/
+miniprogram/
+project.config.json
+project.private.config.json
+setup_windows.bat
+schema.sql
+
+# Duplicate files (use templates/ instead)
+index.html
