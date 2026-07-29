@@ -1,0 +1,6 @@
+{
+  "devDependencies": {
+    "netlify-cli": "^26.2.0",
+    "vercel": "^58.0.0"
+  }
+}
