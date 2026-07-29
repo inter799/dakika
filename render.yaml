@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: dakika
+    env: python
+    runtime: python3.9
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120
+    plan: free

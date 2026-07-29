@@ -2,6 +2,7 @@
 # 核心框架
 Flask>=2.3.0
 flask-cors>=4.0.0
+gunicorn>=21.2.0
 
 # Word 文档解析
 python-docx>=0.8.11
