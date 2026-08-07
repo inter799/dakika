@@ -1,47 +1,9 @@
-# ==================== Windows 完整依赖 ====================
-# 核心框架
 Flask>=2.3.0
 flask-cors>=4.0.0
 gunicorn>=21.2.0
-
-# Word 文档解析
 python-docx>=0.8.11
-
-# 图片处理
 Pillow>=10.0.0
-
-# OCR 文字识别（需系统 tesseract，仅 Windows 本地使用）
-pytesseract>=0.3.10; sys_platform == "win32"
-
-# AI API 调用
-openai>=1.0.0
-
-# PDF 文件解析
 pdfplumber>=0.10.0
 PyPDF2>=3.0.0
-
-# Excel / PPT 解析
 openpyxl>=3.1.0
 python-pptx>=0.6.22
-
-# Google Gemini SDK
-google-generativeai>=0.8.0
-
-# Anthropic Claude SDK
-anthropic>=0.40.0
-
-# 网络搜题功能
-duckduckgo-search>=7.0.0
-beautifulsoup4>=4.12.0
-requests>=2.31.0
-
-# Supabase 数据库（Netlify 部署用）
-supabase>=2.0.0
-
-# ==================== Windows 特有依赖 ====================
-# COM 接口支持（解析旧版 .doc 文件，需安装 Word 或 WPS）
-# 安装后仍需要电脑上装有 Microsoft Word 或 WPS Office
-# 使用环境标记：仅在 Windows 平台安装，避免 Netlify (Linux) 构建失败
-pywin32>=305; sys_platform == "win32"
-
-

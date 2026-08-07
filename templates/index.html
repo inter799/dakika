@@ -223,34 +223,12 @@ body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','M
 <div class="toast-container" id="toastContainer"></div>
 <div class="loading-overlay" id="loadingOverlay"><div class="spinner"></div><div id="loadingText">处理中...</div></div>
 
-<!-- Search Modal -->
-<div class="search-modal-overlay" id="searchModalOverlay" onclick="if(event.target===this)closeSearchModal()">
-    <div class="search-modal">
-        <div class="search-modal-header">
-            <h3>🔍 网络搜题 <span id="searchSpaceName" style="font-weight:400;font-size:0.8rem;color:var(--text-secondary)"></span></h3>
-            <button class="btn btn-sm" style="background:transparent;border:none;font-size:1.2rem;cursor:pointer" onclick="closeSearchModal()">✕</button>
-        </div>
-        <div class="search-modal-body" id="searchModalBody">
-            <div class="search-status" id="searchStatus">请输入关键词或选择空间开始搜索</div>
-        </div>
-        <div class="search-modal-footer">
-            <span id="searchResultSummary" style="font-size:0.72rem;color:var(--text-secondary);margin-right:auto"></span>
-            <button class="btn btn-outline btn-sm" onclick="closeSearchModal()">关闭</button>
-            <button class="btn btn-success btn-sm" id="btnBatchSaveSearch" style="display:none" onclick="batchSaveSearchResults()">💾 保存选中题目到空间</button>
-        </div>
-    </div>
-</div>
-
 <!-- Header -->
 <div class="header">
     <div class="header-inner">
-        <div><h1>📝 智能答题卡</h1><div class="subtitle">上传文档 · 自动生成题库 · 逐题作答</div></div>
+        <div><h1>📝 智能答题卡</h1><div class="subtitle">上传文档 · 自动生成题库 · 逐题作答（纯本地，无需登录）</div></div>
         <div class="controls-row" id="headerControls" style="display:none">
             <span id="headerFileInfo" style="font-size:0.75rem;opacity:0.9"></span>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px">
-            <span id="headerUserInfo" style="font-size:0.75rem;opacity:0.9">👤 {{ display_name or username or '用户' }}</span>
-            <button class="btn btn-sm" style="background:rgba(255,255,255,0.2);color:white;border:1px solid rgba(255,255,255,0.4)" onclick="handleLogout()">🚪 退出登录</button>
         </div>
     </div>
 </div>
@@ -349,33 +327,6 @@ body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','M
 </div>
 
 <script>
-// ==================== GLOBAL FETCH INTERCEPTOR ====================
-// 拦截所有 fetch 请求，401 时自动跳转登录页
-const originalFetch = window.fetch;
-window.fetch = async function(...args) {
-    const response = await originalFetch(...args);
-    if (response.status === 401) {
-        try {
-            const data = await response.clone().json();
-            if (data.login_required) {
-                window.location.href = '/login';
-            }
-        } catch(e) {
-            // 如果不是 JSON 响应，忽略
-        }
-    }
-    return response;
-};
-
-// ==================== LOGOUT ====================
-async function handleLogout() {
-    if (!confirm('确定要退出登录吗？')) return;
-    try {
-        await originalFetch('/api/logout', { method: 'POST' });
-    } catch(e) { /* ignore */ }
-    window.location.href = '/login';
-}
-
 // ==================== STATE ====================
 let allQuestions = [];        // all parsed questions
 let questionOrder = [];       // current display order (indexes into allQuestions)
@@ -386,7 +337,6 @@ let currentMode = 'sequential'; // 'sequential' | 'random'
 let answeredCount = 0;
 let isLocked = false;         // prevent double-click during auto-advance
 let sourceFileName = '';      // 当前文档名（用于题库空间划分）
-let sourceFileText = '';      // 当前文档原文（用于网络搜题）
 
 // 空间考试模式状态
 let examMode = 'document';    // 'document' | 'space' | 'wrongReview'
@@ -429,7 +379,6 @@ async function uploadFile(file) {
         document.getElementById('fileMeta').textContent = `文本: ${data.full_length} 字符 | 识别题目: ${data.parsed_questions?.count || 0} 道`;
         document.getElementById('fileInfo').classList.add('show');
         sourceFileName = data.filename;  // 记录文档名用于题库空间划分
-        sourceFileText = data.full_text || '';  // 记录原文用于网络搜题
 
         if (data.parsed_questions && data.parsed_questions.questions?.length > 0) {
             await saveQuestionsToBank(data.parsed_questions.questions, true);  // 先自动入库
@@ -1272,7 +1221,6 @@ function renderBankSpaces(spaces) {
                     <div style="font-size:0.68rem;color:var(--text-secondary);margin-top:2px">${types} <span style="margin-left:8px">${s.question_count} 题</span>${dateStr ? `<span style="margin-left:8px">${dateStr}</span>` : ''}</div>
                 </div>
                 <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
-                    <button class="btn btn-sm btn-outline" style="font-size:0.7rem;padding:4px 10px;color:#8B5CF6;border-color:#8B5CF6" onclick="event.stopPropagation();openSearchModal('${s.space_id}','${escHtml(s.name.replace(/'/g, "\\'"))}')" title="在网络中搜索相关题目">🔍 搜题</button>
                     <button class="btn btn-sm btn-outline" style="font-size:0.7rem;padding:4px 10px;color:var(--primary);border-color:var(--primary)" onclick="event.stopPropagation();startSpaceExam('${s.space_id}','${escHtml(s.name.replace(/'/g, "\\'"))}')" title="用该空间题目开始答题">▶ 答题</button>
                     <button class="btn btn-sm" style="font-size:0.7rem;padding:4px 10px;background:#FEF3C7;color:#92400E;${(s.wrong_count || 0) === 0 ? 'opacity:0.4' : ''}" onclick="event.stopPropagation();startWrongReview('${s.space_id}','${escHtml(s.name.replace(/'/g, "\\'"))}')" title="回顾错题" ${(s.wrong_count || 0) === 0 ? 'disabled' : ''}>📝 错题</button>
                     <button class="btn btn-sm" style="color:var(--danger);font-size:0.68rem;padding:2px 6px" onclick="event.stopPropagation();deleteSpaceConfirm('${s.space_id}','${escHtml(s.name.replace(/'/g, "\\'"))}')" title="删除整个空间">🗑</button>
@@ -1350,7 +1298,7 @@ async function saveQuestionsToBank(questions, silent) {
             body: JSON.stringify({
                 questions: questionData,
                 space_name: sourceFileName,
-                source_text: sourceFileText
+                source_text: ''
             })
         });
         const data = await res.json();
@@ -1380,7 +1328,7 @@ async function saveToBank(realIdx) {
     };
     if (sourceFileName) {
         payload.space_name = sourceFileName;
-        payload.source_text = sourceFileText;
+        payload.source_text = '';
     }
     try {
         const res = await fetch('/api/bank', {
@@ -1434,236 +1382,6 @@ async function clearBank() {
     } catch(e) { showToast('操作失败', 'e'); }
 }
 
-// ==================== 网络搜题 ====================
-let searchModalSpaceId = '';
-let searchModalSpaceName = '';
-let searchResultsData = [];       // 网页搜索结果
-let searchExtractedData = [];    // 提取的题目
-let searchSelectedIndices = new Set();  // 用户选中的题目索引
-
-function openSearchModal(spaceId, spaceName) {
-    searchModalSpaceId = spaceId;
-    searchModalSpaceName = spaceName;
-    searchResultsData = [];
-    searchExtractedData = [];
-    searchSelectedIndices = new Set();
-
-    document.getElementById('searchModalOverlay').classList.add('show');
-    document.getElementById('searchSpaceName').textContent = spaceName ? `— ${spaceName}` : '';
-    document.getElementById('btnBatchSaveSearch').style.display = 'none';
-    document.getElementById('searchResultSummary').textContent = '';
-
-    // 开始自动搜索
-    document.getElementById('searchStatus').innerHTML = '<div class="spinner" style="margin:20px auto"></div><div style="margin-top:8px">正在搜索网络中的相关题目...</div>';
-    document.getElementById('searchModalBody').innerHTML = '<div class="search-status" id="searchStatus"><div class="spinner" style="margin:20px auto"></div><div style="margin-top:8px">正在搜索网络中的相关题目...</div></div>';
-    performSearch(spaceId);
-}
-
-function closeSearchModal() {
-    document.getElementById('searchModalOverlay').classList.remove('show');
-}
-
-async function performSearch(spaceId) {
-    try {
-        const res = await fetch('/api/search-questions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ space_id: spaceId })
-        });
-        const data = await res.json();
-
-        if (data.error) {
-            document.getElementById('searchModalBody').innerHTML =
-                `<div class="search-status" style="color:var(--danger)">❌ ${escHtml(data.error)}</div>`;
-            return;
-        }
-
-        searchResultsData = data.search_results || [];
-        searchExtractedData = data.extracted_questions || [];
-
-        renderSearchTabs(data);
-    } catch(e) {
-        document.getElementById('searchModalBody').innerHTML =
-            `<div class="search-status" style="color:var(--danger)">❌ 搜索失败: ${escHtml(e.message)}</div>`;
-    }
-}
-
-let currentSearchTab = 'extracted';  // 'extracted' or 'results'
-
-function renderSearchTabs(data) {
-    const extracted = data.extracted_questions || [];
-    const results = data.search_results || [];
-    currentSearchTab = extracted.length > 0 ? 'extracted' : 'results';
-
-    let html = `<div class="search-tabs">
-        <button class="search-tab ${currentSearchTab === 'extracted' ? 'active' : ''}" onclick="switchSearchTab('extracted')">
-            📝 提取题目 (${extracted.length})
-        </button>
-        <button class="search-tab ${currentSearchTab === 'results' ? 'active' : ''}" onclick="switchSearchTab('results')">
-            🌐 网页结果 (${results.length})
-        </button>
-    </div>
-    <div id="searchTabContent"></div>`;
-
-    document.getElementById('searchModalBody').innerHTML = html;
-
-    if (currentSearchTab === 'extracted') {
-        renderExtractedQuestions(extracted);
-    } else {
-        renderSearchResults(results);
-    }
-
-    document.getElementById('searchResultSummary').textContent =
-        `搜索词: ${(data.search_queries || []).join(' | ')}  ·  找到 ${extracted.length} 道题 + ${results.length} 个网页`;
-
-    // 显示/隐藏保存按钮
-    document.getElementById('btnBatchSaveSearch').style.display =
-        (extracted.length > 0) ? '' : 'none';
-}
-
-function switchSearchTab(tab) {
-    currentSearchTab = tab;
-    if (tab === 'extracted') {
-        renderExtractedQuestions(searchExtractedData);
-    } else {
-        renderSearchResults(searchResultsData);
-    }
-    // Update tab styles
-    document.querySelectorAll('.search-tab').forEach(el => {
-        el.classList.toggle('active', el.textContent.trim().startsWith(tab === 'extracted' ? '📝' : '🌐'));
-    });
-}
-
-function renderExtractedQuestions(questions) {
-    const container = document.getElementById('searchTabContent');
-    if (!container) return;
-
-    if (!questions.length) {
-        container.innerHTML = '<div class="search-status">未从网页中提取到题目，请查看"网页结果"标签页手动浏览</div>';
-        document.getElementById('btnBatchSaveSearch').style.display = 'none';
-        return;
-    }
-
-    document.getElementById('btnBatchSaveSearch').style.display = '';
-
-    let html = '';
-    questions.forEach((q, i) => {
-        const typeMap = { choice: ['单选', 'type-single'], multi: ['多选', 'type-multi'], tf: ['判断', 'type-tf'] };
-        const [tl, tc] = typeMap[q.type] || ['选择', 'type-single'];
-        const isSelected = searchSelectedIndices.has(i);
-        html += `<div class="extracted-q-item" style="${isSelected ? 'border-color:var(--primary);background:var(--primary-light)' : ''}" onclick="toggleSearchSelect(${i})">
-            <input type="checkbox" ${isSelected ? 'checked' : ''} style="margin-top:2px;flex-shrink:0" onclick="event.stopPropagation();toggleSearchSelect(${i})">
-            <div class="q-stem-preview">
-                <span class="type-badge ${tc}">${tl}</span>
-                <strong>${escHtml(q.stem)}</strong>
-                <div class="q-meta">
-                    答案: ${escHtml(q.answer || '?')}
-                    ${q.options?.length ? ` | 选项: ${q.options.length}个` : ''}
-                    ${q.source_title ? ` | 来源: ${escHtml(q.source_title)}` : ''}
-                </div>
-            </div>
-            <button class="btn btn-sm btn-outline" style="font-size:0.65rem;padding:2px 8px;flex-shrink:0" onclick="event.stopPropagation();saveSingleSearchResult(${i})" title="保存此题目">💾</button>
-        </div>`;
-    });
-
-    html += `<div style="margin-top:12px;display:flex;gap:8px;align-items:center">
-        <button class="btn btn-sm btn-outline" onclick="toggleSelectAll(${questions.length})">${searchSelectedIndices.size === questions.length ? '取消全选' : '全选'}</button>
-        <span style="font-size:0.72rem;color:var(--text-secondary)">已选 ${searchSelectedIndices.size} / ${questions.length} 题</span>
-    </div>`;
-
-    container.innerHTML = html;
-}
-
-function renderSearchResults(results) {
-    const container = document.getElementById('searchTabContent');
-    if (!container) return;
-
-    if (!results.length) {
-        container.innerHTML = '<div class="search-status">未找到相关网页结果</div>';
-        return;
-    }
-
-    let html = '';
-    results.forEach(r => {
-        html += `<div class="search-result-item">
-            <a class="result-title" href="${escHtml(r.url)}" target="_blank" rel="noopener">${escHtml(r.title)}</a>
-            <div class="result-url">${escHtml(r.url)}</div>
-            <div class="result-snippet">${escHtml(r.snippet)}</div>
-        </div>`;
-    });
-    container.innerHTML = html;
-}
-
-function toggleSearchSelect(index) {
-    if (searchSelectedIndices.has(index)) {
-        searchSelectedIndices.delete(index);
-    } else {
-        searchSelectedIndices.add(index);
-    }
-    // 重新渲染更新复选框状态
-    renderExtractedQuestions(searchExtractedData);
-}
-
-function toggleSelectAll(total) {
-    if (searchSelectedIndices.size === total) {
-        searchSelectedIndices.clear();
-    } else {
-        for (let i = 0; i < total; i++) searchSelectedIndices.add(i);
-    }
-    renderExtractedQuestions(searchExtractedData);
-}
-
-async function saveSingleSearchResult(index) {
-    const q = searchExtractedData[index];
-    if (!q) return;
-    await doSaveSearchQuestions([q]);
-}
-
-async function batchSaveSearchResults() {
-    if (searchSelectedIndices.size === 0) {
-        showToast('请先勾选要保存的题目', 'i');
-        return;
-    }
-    const selected = [];
-    searchSelectedIndices.forEach(i => {
-        if (searchExtractedData[i]) selected.push(searchExtractedData[i]);
-    });
-    await doSaveSearchQuestions(selected);
-}
-
-async function doSaveSearchQuestions(questions) {
-    if (!questions.length) return;
-
-    const questionData = questions.map(q => ({
-        stem: q.stem,
-        type: q.type || 'choice',
-        options: q.options || [],
-        answer: q.answer || '',
-        analysis: q.analysis || '来源：网络搜索',
-        saved_at: new Date().toISOString()
-    }));
-
-    // 保存到空间
-    try {
-        const res = await fetch('/api/bank/save-batch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                questions: questionData,
-                space_name: searchModalSpaceName || '网络搜题',
-                space_id: searchModalSpaceId || undefined
-            })
-        });
-        const data = await res.json();
-        if (data.success) {
-            showToast(`已保存 ${data.added} 道题到"${data.space_name}"`, 's');
-            loadBank();
-            closeSearchModal();
-        } else {
-            showToast(data.error || '保存失败', 'e');
-        }
-    } catch(e) { showToast('保存失败: ' + e.message, 'e'); }
-}
 
 // Load bank on init
 loadBank();

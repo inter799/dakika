@@ -32,6 +32,9 @@ package-lock.json
 # Netlify local state
 .netlify/
 
+# CodeBuddy workspace data
+.codebuddy/
+
 # Unrelated projects
 .rivet/
 .rivet-config.json
