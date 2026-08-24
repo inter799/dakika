@@ -6,6 +6,7 @@
 """
 
 import os, json, re, base64, zipfile, shutil
+import xml.etree.ElementTree as ET
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime
@@ -61,7 +62,7 @@ except ImportError:
 # ==================== 平台检测 ====================
 import platform as _platform
 _IS_WINDOWS = _platform.system() == 'Windows'
-_IS_SERVERLESS = bool(os.environ.get('RAILWAY_ENVIRONMENT') or os.environ.get('NETLIFY') or os.environ.get('RENDER'))
+_IS_SERVERLESS = bool(os.environ.get('RAILWAY_ENVIRONMENT') or os.environ.get('RENDER'))
 
 # ==================== 初始化 ====================
 app = Flask(__name__)
@@ -114,7 +115,7 @@ ALLOWED_EXTENSIONS = {
     # PDF
     'pdf',
     # Excel
-    'xlsx', 'xlsm',
+    'xlsx', 'xlsm', 'xls',
     # PowerPoint
     'pptx',
     # 图片
@@ -152,7 +153,7 @@ def extract_text_from_txt(filepath):
 
 
 def _is_zip_docx(filepath):
-    """检测文件是否为标准的 zip 格式 docx"""
+    """检测文件是否为 zip 格式的 docx（即使扩展名不是 .docx）"""
     try:
         with zipfile.ZipFile(filepath, 'r') as z:
             return 'word/document.xml' in z.namelist()
@@ -160,75 +161,110 @@ def _is_zip_docx(filepath):
         return False
 
 
+def _extract_text_from_docx_xml(filepath):
+    """不依赖 python-docx，直接从 zip + XML 中提取文本（兼容非标准 docx）"""
+    try:
+        with zipfile.ZipFile(filepath, 'r') as z:
+            xml_content = z.read('word/document.xml')
+        # 注册命名空间，防止解析时前缀丢失
+        namespaces = {
+            'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+        }
+        root = ET.fromstring(xml_content)
+        texts = []
+        # 提取所有 <w:t> 节点的文本
+        for t_elem in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'):
+            if t_elem.text:
+                texts.append(t_elem.text)
+        text = ''.join(texts)
+        # 将段落分隔符恢复为换行（<w:p> 代表段落）
+        paragraphs = []
+        for p_elem in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'):
+            p_texts = []
+            for t_elem in p_elem.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'):
+                if t_elem.text:
+                    p_texts.append(t_elem.text)
+            if p_texts:
+                paragraphs.append(''.join(p_texts))
+        result = '\n'.join(paragraphs)
+        return result if result.strip() else ""
+    except Exception:
+        return ""
+
+
+def _extract_text_from_binary(filepath, min_length=8):
+    """从任意二进制文件中提取可读文本字符串（通用最终回退）"""
+    try:
+        with open(filepath, 'rb') as f:
+            raw = f.read()
+        results = []
+        # 尝试多种编码提取
+        for enc in ['utf-8', 'gbk', 'gb2312', 'utf-16-le', 'utf-16-be', 'latin-1']:
+            try:
+                decoded = raw.decode(enc, errors='ignore')
+                # 提取连续的可读字符段
+                if enc.startswith('utf-16'):
+                    # UTF-16 可能有大量\x00，放宽条件
+                    pattern = r'[一-龥a-zA-Z0-9\s，。！？；：、""''《》（）…—.,!?;:()\[\]【】]{%d,}' % min_length
+                else:
+                    pattern = r'[一-龥a-zA-Z0-9\s，。！？；：、""''《》（）…—.,!?;:()\[\]【】]{%d,}' % min_length
+                matches = re.findall(pattern, decoded)
+                if matches:
+                    results.extend(matches)
+            except Exception:
+                continue
+        if results:
+            return '\n\n'.join(results)
+        return ""
+    except Exception:
+        return ""
+
+
 def extract_text_from_docx(filepath):
-    if not HAS_DOCX:
-        return "[错误] 请安装 python-docx: pip install python-docx"
+    """提取 .docx 文本（兼容标准 docx、非标准 zip docx、损坏文件、扩展名错误）"""
+    errors = []
 
-    if not _is_zip_docx(filepath):
-        return "[错误] 该文件不是标准的 .docx 格式。可能是旧版 .doc 文件改名，请用 Word 打开后另存为 .docx，或转换为 .txt 上传。"
-
-    try:
-        doc = DocxDocument(filepath)
-        paras = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    if cell.text.strip():
-                        paras.append(cell.text.strip())
-        text = '\n'.join(paras)
-        if not text.strip():
-            return "[提示] 该 docx 文件内容为空，或文字位于图片/文本框中无法提取。"
-        return text
-    except Exception as e:
-        return f"[错误] 解析docx失败: {e}"
-
-
-def extract_text_from_doc(filepath):
-    """.doc 旧版二进制格式：尝试提取可读文本"""
-    com_errors = []
-    try:
-        if _is_zip_docx(filepath):
-            return extract_text_from_docx(filepath)
-
+    # 策略1：python-docx（标准 OOXML）
+    if HAS_DOCX and _is_zip_docx(filepath):
         try:
-            with open(filepath, 'rb') as f:
-                raw = f.read()
+            doc = DocxDocument(filepath)
+            paras = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            paras.append(cell.text.strip())
+            text = '\n'.join(paras)
+            if text.strip():
+                return text
+        except Exception as e:
+            errors.append(f"python-docx: {e}")
 
-            text_parts = []
-            for enc in ['utf-8', 'gbk', 'gb2312', 'utf-16-le', 'latin-1']:
-                try:
-                    decoded = raw.decode(enc, errors='ignore')
-                    paragraphs = re.findall('[\\u4e00-\\u9fa5a-zA-Z0-9\\s，。！？；：、""''《》（）…—.,!?;:()\\[\\]【】]{20,}', decoded)
-                    if paragraphs:
-                        text_parts.extend(paragraphs)
-                        break
-                except Exception:
-                    continue
+    # 策略2：直接 zip + XML 读取（python-docx 无法处理的非标准 docx）
+    if _is_zip_docx(filepath):
+        text = _extract_text_from_docx_xml(filepath)
+        if text:
+            return text
+        errors.append("zip XML 解析未提取到文本")
 
-            if text_parts:
-                result = '\n\n'.join(text_parts)
-                if len(result) >= 100:
-                    return result
-        except Exception:
-            pass
+    # 策略3：作为旧版二进制 .doc 处理（可能是 .doc 被重命名为 .docx）
+    text = _extract_text_from_binary(filepath, min_length=10)
+    if text and len(text) >= 100:
+        return text
 
-        word = None
+    # 策略4：Windows COM（Word / WPS）
+    if _IS_WINDOWS:
         try:
             import pythoncom
             pythoncom.CoInitialize()
-        except Exception as e:
-            com_errors.append(f"COM初始化失败: {e}")
-
-        try:
             import win32com.client as win32
-            for progid in ["Word.Application", "KWPS.Application", "WPS.Application", "Kwps.Application", "Et.Application"]:
+            word = None
+            for progid in ["Word.Application", "KWPS.Application", "WPS.Application", "Kwps.Application"]:
                 try:
                     word = win32.Dispatch(progid)
                     break
-                except Exception as e:
-                    com_errors.append(f"{progid}: {e}")
-                    word = None
-
+                except Exception:
+                    continue
             if word:
                 word.Visible = False
                 word.DisplayAlerts = 0
@@ -236,41 +272,97 @@ def extract_text_from_doc(filepath):
                 doc = word.Documents.Open(abs_path, ReadOnly=True)
                 text = doc.Content.Text
                 doc.Close(SaveChanges=False)
-                extracted = text.strip() if text else ''
-                try:
-                    word.Quit()
-                except Exception as e:
-                    com_errors.append(f"Word.Application.Quit: {e}")
-                if extracted:
-                    return extracted
+                word.Quit()
+                if text and text.strip():
+                    return text.strip()
+            errors.append("未找到 Word/WPS COM 组件")
         except Exception as e:
-            com_errors.append(f"COM提取失败: {e}")
+            errors.append(f"COM: {e}")
         finally:
-            try:
-                if word:
-                    word.Quit()
-            except Exception:
-                pass
             try:
                 import pythoncom
                 pythoncom.CoUninitialize()
             except Exception:
                 pass
 
+    # 策略5：Linux antiword
+    try:
         import subprocess
-        try:
-            proc = subprocess.run(['antiword', str(filepath)], capture_output=True, text=True, timeout=10)
-            if proc.returncode == 0 and proc.stdout.strip():
-                return proc.stdout.strip()
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-
-        err_detail = '; '.join(com_errors) if com_errors else '未知原因'
-        return (f"[错误] 无法解析旧版 .doc 文件。\n"
-                f"[建议] 请用 Word/WPS 打开后另存为 .docx 或 .txt 再上传。\n"
-                f"[详情] {err_detail}")
+        proc = subprocess.run(['antiword', str(filepath)], capture_output=True, text=True, timeout=10)
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
     except Exception as e:
-        return f"[错误] 无法解析旧版 .doc 文件: {e}。请确保电脑已安装 Word 或 WPS，或者手动另存为 .docx / .txt 后重新上传。"
+        errors.append(f"antiword: {e}")
+
+    err_msg = "; ".join(errors) if errors else "未知原因"
+    return (f"[错误] 无法解析 Word 文档。\n"
+            f"[建议] 请用 Word/WPS 打开后另存为 .docx 或 .txt 再上传。\n"
+            f"[详情] {err_msg}")
+
+
+def extract_text_from_doc(filepath):
+    """提取 .doc 文本（兼容旧版二进制 .doc、被重命名的 docx、损坏文件）"""
+    errors = []
+
+    # 策略1：先检测是否实际为 zip 格式 docx（扩展名被错误修改）
+    if _is_zip_docx(filepath):
+        return extract_text_from_docx(filepath)
+
+    # 策略2：二进制可读文本提取
+    text = _extract_text_from_binary(filepath, min_length=10)
+    if text and len(text) >= 100:
+        return text
+
+    # 策略3：Windows COM（Word / WPS）
+    if _IS_WINDOWS:
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+            import win32com.client as win32
+            word = None
+            for progid in ["Word.Application", "KWPS.Application", "WPS.Application", "Kwps.Application"]:
+                try:
+                    word = win32.Dispatch(progid)
+                    break
+                except Exception:
+                    continue
+            if word:
+                word.Visible = False
+                word.DisplayAlerts = 0
+                abs_path = os.path.abspath(filepath)
+                doc = word.Documents.Open(abs_path, ReadOnly=True)
+                text = doc.Content.Text
+                doc.Close(SaveChanges=False)
+                word.Quit()
+                if text and text.strip():
+                    return text.strip()
+            errors.append("未找到 Word/WPS COM 组件")
+        except Exception as e:
+            errors.append(f"COM: {e}")
+        finally:
+            try:
+                import pythoncom
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+    # 策略4：Linux antiword
+    try:
+        import subprocess
+        proc = subprocess.run(['antiword', str(filepath)], capture_output=True, text=True, timeout=10)
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    except Exception as e:
+        errors.append(f"antiword: {e}")
+
+    err_msg = "; ".join(errors) if errors else "未知原因"
+    return (f"[错误] 无法解析旧版 .doc 文件。\n"
+            f"[建议] 请用 Word/WPS 打开后另存为 .docx 或 .txt 再上传。\n"
+            f"[详情] {err_msg}")
 
 
 def extract_text_from_image(filepath):
@@ -292,7 +384,10 @@ def extract_text_from_image(filepath):
 
 
 def extract_text_from_pdf(filepath):
-    """解析 PDF 文件，优先使用 pdfplumber，回退到 PyPDF2"""
+    """解析 PDF 文件：支持文本 PDF、加密 PDF、扫描版/图片 PDF OCR"""
+    errors = []
+
+    # 策略1：pdfplumber（最佳文本提取）
     if HAS_PDFPLUMBER:
         try:
             pages_text = []
@@ -304,14 +399,21 @@ def extract_text_from_pdf(filepath):
             text = '\n\n'.join(pages_text)
             if text.strip():
                 return text
-        except Exception:
-            pass
+        except Exception as e:
+            errors.append(f"pdfplumber: {e}")
 
+    # 策略2：PyPDF2（支持加密 PDF 空密码解密）
     if HAS_PYPDF2:
         try:
             pages_text = []
             with open(filepath, 'rb') as f:
                 reader = PyPDF2.PdfReader(f)
+                # 尝试解密（空密码）
+                if reader.is_encrypted:
+                    try:
+                        reader.decrypt('')
+                    except Exception:
+                        pass
                 for page in reader.pages:
                     page_text = page.extract_text()
                     if page_text:
@@ -319,11 +421,43 @@ def extract_text_from_pdf(filepath):
             text = '\n\n'.join(pages_text)
             if text.strip():
                 return text
-            return "[提示] PDF 中未检测到可提取文字（可能是扫描版图片PDF，需要 OCR）"
+            # 有页数但无文本 → 可能是扫描版 PDF
+            if len(reader.pages) > 0:
+                errors.append("PyPDF2 未提取到文本（可能是扫描版图片PDF）")
+            else:
+                errors.append("PDF 页数为零")
         except Exception as e:
-            return f"[错误] 解析 PDF 失败: {e}。请安装依赖: py -m pip install pdfplumber PyPDF2"
+            errors.append(f"PyPDF2: {e}")
 
-    return "[错误] 请安装 PDF 解析依赖: py -m pip install pdfplumber PyPDF2"
+    # 策略3：OCR 扫描版 PDF（需要 PIL + pytesseract + pdf2image）
+    if HAS_PIL and HAS_TESSERACT:
+        try:
+            from pdf2image import convert_from_path
+            images = convert_from_path(filepath, dpi=200, first_page=1, last_page=min(5, 20))
+            if images:
+                ocr_texts = []
+                for img in images:
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    page_text = pytesseract.image_to_string(img, lang='chi_sim+eng')
+                    if page_text.strip():
+                        ocr_texts.append(page_text.strip())
+                if ocr_texts:
+                    return '\n\n'.join(ocr_texts)
+        except ImportError:
+            errors.append("扫描版 PDF OCR 需要 pdf2image: pip install pdf2image（还需安装 poppler）")
+        except Exception as e:
+            errors.append(f"PDF OCR: {e}")
+
+    # 策略4：最终回退 - 尝试作为二进制提取（某些特殊 PDF）
+    text = _extract_text_from_binary(filepath, min_length=12)
+    if text and len(text) >= 100:
+        return text
+
+    err_msg = "; ".join(errors) if errors else "未知原因"
+    return (f"[错误] 无法解析 PDF 文件。\n"
+            f"[建议] 若是扫描版/图片PDF，请安装: pip install pdf2image pytesseract Pillow，并安装系统级 poppler 与 tesseract。\n"
+            f"[详情] {err_msg}")
 
 
 def extract_text_from_rtf(filepath):
@@ -372,7 +506,7 @@ def extract_text_from_plain(filepath):
 
 
 def extract_text_from_xlsx(filepath):
-    """解析 Excel 表格文件，读取每个单元格的文本"""
+    """解析 Excel 表格文件（.xlsx / .xlsm），支持损坏文件回退"""
     if not HAS_OPENPYXL:
         return "[错误] 请安装 openpyxl: py -m pip install openpyxl"
     try:
@@ -384,13 +518,52 @@ def extract_text_from_xlsx(filepath):
                 if row_text.strip():
                     lines.append(row_text)
         text = '\n'.join(lines)
-        return text if text.strip() else "[提示] Excel 文件中未检测到文字"
-    except Exception as e:
-        return f"[错误] 解析 Excel 失败: {e}"
+        if text.strip():
+            return text
+    except Exception:
+        pass
+
+    # 回退：openpyxl 失败时尝试 zip + XML 读取（兼容损坏文件）
+    try:
+        with zipfile.ZipFile(filepath, 'r') as z:
+            sheets = [n for n in z.namelist() if n.startswith('xl/worksheets/sheet') and n.endswith('.xml')]
+            texts = []
+            for sheet_path in sorted(sheets):
+                xml_content = z.read(sheet_path)
+                root = ET.fromstring(xml_content)
+                # OOXML Spreadsheet 命名空间
+                ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+                for row_elem in root.iter(f'{{{ns}}}row'):
+                    row_texts = []
+                    for cell_elem in row_elem.iter(f'{{{ns}}}c'):
+                        # 获取 <v> 或 <is><t> 中的文本
+                        v_elem = cell_elem.find(f'{{{ns}}}v')
+                        if v_elem is not None and v_elem.text:
+                            row_texts.append(v_elem.text)
+                        else:
+                            is_elem = cell_elem.find(f'{{{ns}}}is')
+                            if is_elem is not None:
+                                t_elem = is_elem.find(f'{{{ns}}}t')
+                                if t_elem is not None and t_elem.text:
+                                    row_texts.append(t_elem.text)
+                    if row_texts:
+                        texts.append(' '.join(row_texts))
+            result = '\n'.join(texts)
+            if result.strip():
+                return result
+    except Exception:
+        pass
+
+    # 最终回退：二进制文本提取
+    text = _extract_text_from_binary(filepath, min_length=8)
+    if text and len(text) >= 50:
+        return text
+
+    return "[提示] Excel 文件中未检测到文字，或文件已损坏"
 
 
 def extract_text_from_pptx(filepath):
-    """解析 PowerPoint 演示文稿"""
+    """解析 PowerPoint 演示文稿（.pptx），支持损坏文件回退"""
     if not HAS_PPTX:
         return "[错误] 请安装 python-pptx: py -m pip install python-pptx"
     try:
@@ -401,9 +574,45 @@ def extract_text_from_pptx(filepath):
                 if hasattr(shape, 'text') and shape.text.strip():
                     texts.append(shape.text.strip())
         text = '\n\n'.join(texts)
-        return text if text.strip() else "[提示] PPT 中未检测到文字"
-    except Exception as e:
-        return f"[错误] 解析 PPT 失败: {e}"
+        if text.strip():
+            return text
+    except Exception:
+        pass
+
+    # 回退：python-pptx 失败时尝试 zip + XML 读取（兼容损坏文件）
+    try:
+        with zipfile.ZipFile(filepath, 'r') as z:
+            slides = [n for n in z.namelist() if n.startswith('ppt/slides/slide') and n.endswith('.xml')]
+            texts = []
+            for slide_path in sorted(slides):
+                xml_content = z.read(slide_path)
+                root = ET.fromstring(xml_content)
+                # DrawingML 命名空间
+                ns_a = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+                for t_elem in root.iter(f'{{{ns_a}}}t'):
+                    if t_elem.text:
+                        texts.append(t_elem.text)
+            result = '\n'.join(texts)
+            if result.strip():
+                return result
+    except Exception:
+        pass
+
+    # 最终回退：二进制文本提取
+    text = _extract_text_from_binary(filepath, min_length=8)
+    if text and len(text) >= 50:
+        return text
+
+    return "[提示] PPT 中未检测到文字，或文件已损坏"
+
+
+def extract_text_from_xls(filepath):
+    """旧版 .xls 二进制格式：尝试提取可读文本"""
+    # 旧版 .xls 不是 zip 格式，openpyxl 不支持，只能尝试二进制提取
+    text = _extract_text_from_binary(filepath, min_length=8)
+    if text and len(text) >= 50:
+        return text
+    return "[错误] 无法解析旧版 .xls 文件。请用 Excel/WPS 打开后另存为 .xlsx 再上传。"
 
 
 def extract_text(filepath, original_filename):

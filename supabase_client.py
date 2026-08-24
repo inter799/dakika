@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Supabase 数据库客户端
-替代本地文件存储，支持 Netlify 无状态部署
+替代本地文件存储，支持云端无状态部署
 """
 
 import os
@@ -35,7 +35,7 @@ def _get_client() -> Client:
         if not _url or not _key:
             raise RuntimeError(
                 "缺少 SUPABASE_URL 或 SUPABASE_ANON_KEY 环境变量。"
-                "请在 Netlify 环境变量中设置这些值。"
+                "请在环境变量中设置这些值。"
             )
         _db = create_client(_url, _key)
     return _db

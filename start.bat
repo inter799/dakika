@@ -22,12 +22,45 @@ for /f "tokens=*" %%i in ('py --version') do set PY_VER=%%i
 echo [检查] %PY_VER% 已就绪
 echo.
 
-:: ==================== 安装/更新依赖 ====================
-echo [1/3] 正在安装/更新 Python 依赖...
-py -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --quiet --upgrade
+::: ==================== 检测/安装依赖 ====================
+echo [1/3] 检测/安装 Python 依赖...
+
+:: 关键背景：pip 24 默认 install 时会偷偷访问 pypi.org 自检最新版本，
+:: 然后把你 pip 从 24 升到 26。该行为完全无视 -i 设置，
+:: 是先前 pypi.org 超时、脚本卡死的根因。
+:: 解决两步：a) 用国内源手动升一次 pip；b) 依赖已装就跳过 install。
+
+set PIP_DISABLE_PIP_VERSION_CHECK=1
+set PIP_NO_PYTHON_VERSION_WARNINGS=1
+
+:: 步骤 A：升级 pip 自身（用国内源，一次到位，避免后续 install 再触发自升级）
+echo   - 升级 pip 自身...
+py -m pip install --upgrade pip ^
+  -i https://mirrors.aliyun.com/pypi/simple ^
+  --quiet ^
+  --timeout 60 ^
+  --retries 5
+
+:: 步骤 B：检测关键依赖是否已就绪（绝大多数情况下已就绪 → 直接跳过 install）
+echo   - 检测关键依赖...
+py -c "import flask, docx, PIL, pdfplumber, PyPDF2, openpyxl, pptx" 2>nul
 if %errorlevel% neq 0 (
-    echo [警告] 部分依赖安装失败，尝试用官方源重试...
-    py -m pip install -r requirements.txt --quiet
+    echo   - 依赖缺失，开始安装（国内双镜像）...
+    py -m pip install -r requirements.txt ^
+      -i https://mirrors.aliyun.com/pypi/simple ^
+      --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple ^
+      --timeout 120 ^
+      --retries 5 ^
+      --no-build-isolation ^
+      --quiet
+) else (
+    echo   - 依赖已就绪，跳过安装
+)
+echo [完成] 依赖检查完成
+echo.
+      -i https://pypi.tuna.tsinghua.edu.cn/simple ^
+      --timeout 120 ^
+      --retries 5
 )
 echo [完成] 依赖安装完成
 echo.

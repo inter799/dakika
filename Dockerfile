@@ -22,9 +22,6 @@ RUN mkdir -p /tmp/data /tmp/uploads
 # Cloud Run 默认端口
 ENV PORT=8080
 
-# 标记生产环境
-ENV NETLIFY=true
-
 EXPOSE 8080
 
 CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080", "--timeout", "120", "--workers", "2", "--access-logfile", "-"]
