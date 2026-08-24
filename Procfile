@@ -1,1 +1,1 @@
-web: bash -c "gunicorn app:app --bind 0.0.0.0:\${PORT:-5000} --timeout 120 --workers 1"
+web: gunicorn --timeout 120 --workers 1 wsgi:application
