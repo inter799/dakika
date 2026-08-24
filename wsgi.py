@@ -1,14 +1,14 @@
-"""WSGI 入口 — 兼容 Railway / Render / 任何平台。
+"""WSGI 入口 — 用 Python 端直接启动应用（完全避免 --bind 解析问题）。
 
+Railway / Render 平台注入 PORT 环境变量，本文件读取后传给 Flask。
 启动命令（Procfile / Render）:
-    gunicorn --timeout 120 --workers 1 wsgi:application
-
-gunicorn 会自动读取平台注入的 PORT 环境变量（默认 8000）。
+    python wsgi.py
 """
 import os
-from app import app as application
+from app import app
 
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    application.run(host='0.0.0.0', port=port)
+    # debug=False, 监听 0.0.0.0 接受外部访问
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)

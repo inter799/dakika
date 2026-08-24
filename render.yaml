@@ -4,5 +4,5 @@ services:
     env: python
     runtime: python3.9
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --timeout 120 wsgi:application
+    startCommand: python wsgi.py
     plan: free
