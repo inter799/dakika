@@ -361,6 +361,185 @@ async function init() {
 
 function handleFileSelect(event) { const f = event.target.files[0]; if(f) uploadFile(f); }
 
+// ==================== localStorage 数据层（方案A：每人浏览器独立，关闭即清） ====================
+const BANK_STORE_KEY = 'dakika_bank_v1';
+function _readBankStore() {
+    try {
+        const raw = localStorage.getItem(BANK_STORE_KEY);
+        if (!raw) return { spaces: {} };
+        const obj = JSON.parse(raw);
+        if (!obj.spaces) obj.spaces = {};
+        return obj;
+    } catch(e) { return { spaces: {} }; }
+}
+function _writeBankStore(store) {
+    try { localStorage.setItem(BANK_STORE_KEY, JSON.stringify(store)); } catch(e) { /* 存储满时静默 */ }
+}
+function _genSpaceId(name) {
+    const base = (name || '未命名文档').replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_').slice(0, 30);
+    const ts = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
+    return `${base}_${ts}`;
+}
+// 兼容旧逻辑：用稳定的 space_id（基于文件名）让同一文档多次上传进同一空间
+function _stableSpaceId(name) {
+    const base = (name || '未命名文档').replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_').slice(0, 40);
+    return `st_${base}`;
+}
+const localBank = {
+    // 返回 {spaces:[{space_id,name,created_at,question_count,question_types,wrong_count}], total_spaces, total_questions}
+    getSummary() {
+        const store = _readBankStore();
+        const spaces = Object.entries(store.spaces).map(([sid, s]) => {
+            const qs = s.questions || [];
+            return {
+                space_id: sid,
+                name: s.name || sid,
+                created_at: s.created_at || '',
+                question_count: qs.length,
+                question_types: Array.from(new Set(qs.map(q => q.type || 'choice'))),
+                wrong_count: Object.keys(s.wrong_book || {}).length
+            };
+        });
+        spaces.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+        return {
+            spaces,
+            total_spaces: spaces.length,
+            total_questions: spaces.reduce((sum, s) => sum + s.question_count, 0)
+        };
+    },
+    getSpace(spaceId) {
+        const store = _readBankStore();
+        const s = store.spaces[spaceId];
+        if (!s) return null;
+        return {
+            space_id: spaceId,
+            name: s.name || spaceId,
+            created_at: s.created_at || '',
+            questions: s.questions || [],
+            total: (s.questions || []).length
+        };
+    },
+    // 保存一批题目（按 sourceFileName 稳定空间）
+    saveBatch(questions, spaceName, sourceText) {
+        const store = _readBankStore();
+        const sid = _stableSpaceId(spaceName);
+        const existing = store.spaces[sid];
+        let startId;
+        if (existing) {
+            startId = existing.next_id || (existing.questions || []).length + 1;
+            questions.forEach(q => {
+                q.bank_id = startId;
+                startId += 1;
+                existing.questions.push(q);
+            });
+            existing.next_id = startId;
+            if (sourceText) existing.source_text = sourceText;
+        } else {
+            startId = 1;
+            questions.forEach(q => { q.bank_id = startId; startId += 1; });
+            store.spaces[sid] = {
+                name: spaceName,
+                created_at: new Date().toISOString(),
+                questions: questions.slice(),
+                next_id: startId,
+                source_text: sourceText || '',
+                wrong_book: {}
+            };
+        }
+        _writeBankStore(store);
+        return { success: true, space_id: sid, space_name: spaceName, added: questions.length, total_in_space: store.spaces[sid].questions.length };
+    },
+    // 单题保存（用 stable spaceId）
+    addOne(question, spaceName) {
+        const store = _readBankStore();
+        const sid = _stableSpaceId(spaceName);
+        const existing = store.spaces[sid];
+        let startId;
+        if (existing) {
+            startId = existing.next_id || (existing.questions || []).length + 1;
+            question.bank_id = startId;
+            existing.questions.push(question);
+            existing.next_id = startId + 1;
+        } else {
+            question.bank_id = 1;
+            store.spaces[sid] = {
+                name: spaceName,
+                created_at: new Date().toISOString(),
+                questions: [question],
+                next_id: 2,
+                source_text: '',
+                wrong_book: {}
+            };
+        }
+        _writeBankStore(store);
+        return { success: true, space_id: sid, space_name: spaceName, total_in_space: store.spaces[sid].questions.length };
+    },
+    renameSpace(spaceId, newName) {
+        const store = _readBankStore();
+        if (!store.spaces[spaceId]) return { error: '空间未找到' };
+        store.spaces[spaceId].name = newName;
+        _writeBankStore(store);
+        return { success: true, space_id: spaceId, name: newName };
+    },
+    deleteSpace(spaceId) {
+        const store = _readBankStore();
+        if (!(spaceId in store.spaces)) return { error: '空间未找到' };
+        delete store.spaces[spaceId];
+        _writeBankStore(store);
+        return { success: true };
+    },
+    deleteQuestion(bankId) {
+        const store = _readBankStore();
+        for (const [sid, s] of Object.entries(store.spaces)) {
+            const before = s.questions.length;
+            s.questions = s.questions.filter(q => q.bank_id != bankId);
+            if (s.questions.length < before) {
+                if (!s.questions.length) delete store.spaces[sid];
+                _writeBankStore(store);
+                return { success: true, deleted_from: sid };
+            }
+        }
+        return { error: '题目未找到' };
+    },
+    recordWrong(spaceId, wrongList) {
+        const store = _readBankStore();
+        const s = store.spaces[spaceId];
+        if (!s) return { error: '空间未找到' };
+        if (!s.wrong_book) s.wrong_book = {};
+        wrongList.forEach(wq => {
+            const bid = String(wq.bank_id || '');
+            if (bid) s.wrong_book[bid] = {
+                bank_id: wq.bank_id, stem: wq.stem, type: wq.type || 'choice',
+                options: wq.options || [], answer: wq.answer || '',
+                analysis: wq.analysis || '', user_answer: wq.user_answer || '',
+                recorded_at: new Date().toISOString()
+            };
+        });
+        _writeBankStore(store);
+        return { success: true, wrong_count: Object.keys(s.wrong_book).length, space_id: spaceId };
+    },
+    getWrong(spaceId) {
+        const store = _readBankStore();
+        const s = store.spaces[spaceId];
+        if (!s) return { error: '空间未找到' };
+        const wrong = Object.values(s.wrong_book || {});
+        wrong.sort((a, b) => (b.recorded_at || '').localeCompare(a.recorded_at || ''));
+        return { space_id: spaceId, space_name: s.name || spaceId, wrong_questions: wrong, wrong_count: wrong.length };
+    },
+    clearWrong(spaceId) {
+        const store = _readBankStore();
+        const s = store.spaces[spaceId];
+        if (!s) return { error: '空间未找到' };
+        s.wrong_book = {};
+        _writeBankStore(store);
+        return { success: true, space_id: spaceId };
+    },
+    clearAll() {
+        _writeBankStore({ spaces: {} });
+        return { success: true, total: 0 };
+    }
+};
+
 // ==================== UPLOAD ====================
 async function uploadFile(file) {
     const ext = file.name.split('.').pop().toLowerCase();
@@ -1003,9 +1182,8 @@ async function startSpaceExam(spaceId, spaceName) {
 
     showLoading('加载空间题目...');
     try {
-        const res = await fetch('/api/bank/space/' + spaceId);
-        const data = await res.json();
-        if (data.questions?.length > 0) {
+        const data = localBank.getSpace(spaceId);
+        if (data && data.questions?.length > 0) {
             startExam(data.questions, 'space', spaceId, spaceName);
             showToast(`已加载"${spaceName}"空间 ${data.questions.length} 题`, 's');
         } else {
@@ -1040,21 +1218,15 @@ function returnToSpace() {
 async function recordSpaceWrong(q, userAns) {
     if (!currentSpaceId) return;
     try {
-        await fetch(`/api/bank/space/${currentSpaceId}/wrong`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                wrong_questions: [{
-                    bank_id: q.bank_id || q.id,
-                    stem: q.stem,
-                    type: q.type || 'choice',
-                    options: q.options || [],
-                    answer: q.answer || '',
-                    analysis: q.analysis || '',
-                    user_answer: userAns
-                }]
-            })
-        });
+        localBank.recordWrong(currentSpaceId, [{
+            bank_id: q.bank_id || q.id,
+            stem: q.stem,
+            type: q.type || 'choice',
+            options: q.options || [],
+            answer: q.answer || '',
+            analysis: q.analysis || '',
+            user_answer: userAns
+        }]);
     } catch(e) { /* 静默失败 */ }
 }
 
@@ -1078,11 +1250,7 @@ async function saveSpaceWrongs() {
     }
     if (wrongList.length > 0 && currentSpaceId) {
         try {
-            await fetch(`/api/bank/space/${currentSpaceId}/wrong`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ wrong_questions: wrongList })
-            });
+            localBank.recordWrong(currentSpaceId, wrongList);
         } catch(e) { /* 静默 */ }
     }
 }
@@ -1090,8 +1258,7 @@ async function saveSpaceWrongs() {
 async function startWrongReview(spaceId, spaceName) {
     showLoading('加载错题...');
     try {
-        const res = await fetch(`/api/bank/space/${spaceId}/wrong`);
-        const data = await res.json();
+        const data = localBank.getWrong(spaceId);
         if (data.wrong_questions?.length > 0) {
             // 保存当前考试状态
             if (examMode === 'document' && allQuestions.length > 0) {
@@ -1119,8 +1286,8 @@ async function clearSpaceWrongs() {
     const spaceId = currentSpaceId || prompt('请输入空间ID:');
     if (!spaceId) return;
     try {
-        const res = await fetch(`/api/bank/space/${spaceId}/wrong/clear`, { method: 'POST' });
-        if (res.ok) {
+        const res = localBank.clearWrong(spaceId);
+        if (res.success) {
             showToast('错题本已清空', 's');
             loadBank();
         }
@@ -1131,12 +1298,7 @@ async function renameSpace(spaceId, currentName) {
     const newName = prompt('请输入新的空间名称:', currentName);
     if (!newName || newName.trim() === '' || newName.trim() === currentName) return;
     try {
-        const res = await fetch(`/api/bank/space/${spaceId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: newName.trim() })
-        });
-        const data = await res.json();
+        const data = localBank.renameSpace(spaceId, newName.trim());
         if (data.success) {
             showToast('空间已重命名', 's');
             loadBank();
@@ -1185,8 +1347,7 @@ function toggleBank() {
 
 async function loadBank() {
     try {
-        const res = await fetch('/api/bank');
-        const data = await res.json();
+        const data = localBank.getSummary();
         const spaces = data.spaces || [];
         const totalQ = data.total_questions || 0;
         document.getElementById('bankCount').textContent = totalQ > 0 ? `(${spaces.length}个空间, ${totalQ}题)` : '';
@@ -1243,9 +1404,8 @@ async function toggleSpace(spaceId) {
     if (detail.style.display === 'none') {
         // Load questions
         try {
-            const res = await fetch('/api/bank/space/' + spaceId);
-            const data = await res.json();
-            if (data.questions?.length > 0) {
+            const data = localBank.getSpace(spaceId);
+            if (data && data.questions?.length > 0) {
                 let qHtml = '';
                 data.questions.forEach(q => {
                     const typeMap = { choice: ['单选', 'type-single'], multi: ['多选', 'type-multi'], tf: ['判断', 'type-tf'] };
@@ -1292,16 +1452,7 @@ async function saveQuestionsToBank(questions, silent) {
 
     if (!silent) showLoading('保存题目到题库空间...');
     try {
-        const res = await fetch('/api/bank/save-batch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                questions: questionData,
-                space_name: sourceFileName,
-                source_text: ''
-            })
-        });
-        const data = await res.json();
+        const data = localBank.saveBatch(questionData, sourceFileName, '');
         if (data.success) {
             if (!silent) showToast(`已保存 ${data.added} 道题到"${data.space_name}"空间`, 's');
             loadBank();
@@ -1331,12 +1482,7 @@ async function saveToBank(realIdx) {
         payload.source_text = '';
     }
     try {
-        const res = await fetch('/api/bank', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        const data = await res.json();
+        const data = localBank.addOne(questionData, sourceFileName || '未命名文档');
         if (data.success) {
             showToast(`已加入"${data.space_name}"空间 (共${data.total_in_space}题)`, 's');
             loadBank();
@@ -1347,8 +1493,7 @@ async function saveToBank(realIdx) {
 async function deleteSpaceConfirm(spaceId, spaceName) {
     if (!confirm(`确定删除空间"${spaceName}"及其中所有题目？`)) return;
     try {
-        const res = await fetch('/api/bank/space/' + spaceId, { method: 'DELETE' });
-        const data = await res.json();
+        const data = localBank.deleteSpace(spaceId);
         if (data.success) {
             showToast('空间已删除', 'i');
             loadBank();
@@ -1358,8 +1503,7 @@ async function deleteSpaceConfirm(spaceId, spaceName) {
 
 async function removeFromBank(bankId) {
     try {
-        const res = await fetch(`/api/bank/${bankId}`, { method: 'DELETE' });
-        const data = await res.json();
+        const data = localBank.deleteQuestion(bankId);
         if (data.success) {
             showToast('已从题库删除', 'i');
             loadBank();
@@ -1376,7 +1520,7 @@ async function removeFromBank(bankId) {
 
 async function clearBank() {
     try {
-        await fetch('/api/bank/clear', { method: 'POST' });
+        localBank.clearAll();
         showToast('题库已全部清空', 'i');
         loadBank();
     } catch(e) { showToast('操作失败', 'e'); }

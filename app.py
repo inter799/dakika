@@ -83,10 +83,9 @@ DATA_ROOT.mkdir(parents=True, exist_ok=True)
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 
 
-# ==================== 题库存储辅助（纯本地共享） ====================
+# ==================== 题库存储辅助（前端 localStorage 模式，服务端不再持久化） ====================
 def load_bank():
-    if BANK_FILE.exists():
-        return json.loads(BANK_FILE.read_text(encoding='utf-8'))
+    # 方案A：题库由浏览器 localStorage 管理，服务端返回空 bank（保持API兼容）
     return _new_bank()
 
 
@@ -95,7 +94,8 @@ def _new_bank():
 
 
 def save_bank(bank):
-    BANK_FILE.write_text(json.dumps(bank, ensure_ascii=False, indent=2), encoding='utf-8')
+    # 纯前端存储模式：服务端不写文件
+    pass
 
 
 def _generate_space_id(name):
